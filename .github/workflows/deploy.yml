@@ -1,0 +1,78 @@
+name: Deploy Yadea Pakistan to Production (yadea.biztrack.uk)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: yadea-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check SSH secret is configured
+        run: |
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::SSH_PRIVATE_KEY secret is missing. Add the private key (yadea-deploy) to repository secrets first."
+            exit 1
+          fi
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Deploy dist + api (non-destructive, yadea.biztrack.uk only)
+        env:
+          SERVER_HOST: "81.17.101.93"
+          SERVER_USER: "root"
+          TARGET: "/var/www/yadea-pakistan"
+        run: |
+          set -e
+          HOST="${SERVER_HOST}"
+          USER="${SERVER_USER}"
+          BASE="${TARGET}"
+          ssh -o StrictHostKeyChecking=no "${USER}@${HOST}" "BASE='${BASE}' bash" << 'ENDSSH'
+            set -euo pipefail
+            mkdir -p "${BASE}/dist" "${BASE}/api"
+            echo "Ready to receive files on ${BASE}"
+          ENDSSH
+
+          # Static SPA build -> dist (build files only; config/DB/nginx untouched)
+          rsync -avz --delete \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            dist/ "${USER}@${HOST}:${BASE}/dist/"
+
+          # PHP API -> api (NO --delete; live credential files are never overwritten)
+          rsync -avz \
+            --exclude='config.php' \
+            --exclude='mail_secrets.php' \
+            --exclude='mail_config.php' \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            api/ "${USER}@${HOST}:${BASE}/api/"
+
+          # Restore ownership/permissions so PHP-FPM (www-data) can read everything
+          ssh -o StrictHostKeyChecking=no "${USER}@${HOST}" "BASE='${BASE}' bash" << 'ENDSSH'
+            set -euo pipefail
+            find "${BASE}/dist" -type f -exec chmod 644 {} +
+            find "${BASE}/dist" -type d -exec chmod 755 {} +
+            find "${BASE}/api" -type f -exec chmod 644 {} +
+            find "${BASE}/api" -type d -exec chmod 755 {} +
+            chown -R www-data:www-data "${BASE}/dist" "${BASE}/api"
+            echo "Ownership and permissions restored"
+          ENDSSH
+          echo "Deploy to yadea.biztrack.uk completed"
+
+      - name: Verify yadea.biztrack.uk is up
+        run: |
+          set -e
+          curl -sf -o /dev/null -w "yadea.biztrack.uk HTTP %{http_code}\n" https://yadea.biztrack.uk/
+          curl -sf -o /dev/null -w "yadea.biztrack.uk assets HTTP %{http_code}\n" https://yadea.biztrack.uk/assets/index-BaQJkLeH.js
+          echo "Site verification passed"
