@@ -21,11 +21,12 @@ import GeneralSettingsAccordion, {
   type GeneralSettingsState,
   type LabelAlignment,
 } from './GeneralSettingsAccordion';
-import DropdownLogicSettings, {
-  type DropdownLogic,
-  isLogicDropdownType,
-  resolveDropdownOptions,
-} from './DropdownLogicSettings';
+import LocalDropdownSettings, {
+  type LocalDropdownRow,
+  LocalDropdownRowsField,
+  defaultLocalRow,
+  childOptionsFor,
+} from './LocalDropdownSettings';
 import { useAuth } from '../auth';
 import UserMenu from './UserMenu';
 import NotificationsBell from './NotificationsBell';
@@ -129,8 +130,8 @@ interface FormElement {
     mobile: LabelAlignment;
   };
   options?: string[];
-  /** Optional dependent-dropdown logic (controlling field + option mappings). */
-  logic?: DropdownLogic;
+  /** Local Dropdown rows (parent/child dropdown pairs), used when type is 'local_dropdown'. */
+  rows?: LocalDropdownRow[];
   buttonColor?: string;
   buttonTextColor?: string;
 }
@@ -384,6 +385,7 @@ const elementCategories: ElementCategory[] = [
     items: [
       { key: 'single_dropdown', label: 'Single Dropdown', type: 'single_dropdown', icon: <FaCaretDown className="text-sm sm:text-base" />, placeholder: 'Select option' },
       { key: 'multi_dropdown', label: 'Multi Dropdown', type: 'multi_dropdown', icon: <FaBarsStaggered className="text-sm sm:text-base" />, placeholder: 'Select options' },
+      { key: 'local_dropdown', label: 'Local Dropdown', type: 'local_dropdown', icon: <FaLink className="text-sm sm:text-base" />, placeholder: 'Local Dropdown' },
       { key: 'checkbox', label: 'Checkbox', type: 'checkbox', icon: <FaRegSquareCheck className="text-sm sm:text-base" />, placeholder: '' },
       { key: 'radio', label: 'Radio', type: 'radio', icon: <FaRegCircleDot className="text-sm sm:text-base" />, placeholder: '' },
     ],
@@ -624,8 +626,7 @@ function FieldRenderer({
   onAddOption,
   onEditOption,
   onRemoveOption,
-  previewOptions,
-  previewValue,
+  previewValues,
   onPreviewChange,
 }: {
   element: FormElement;
@@ -635,11 +636,10 @@ function FieldRenderer({
   onAddOption?: () => void;
   onEditOption?: (index: number, value: string) => void;
   onRemoveOption?: (index: number) => void;
-  // Live logic preview: when provided, dropdowns render interactive so the
-  // dependent-option cascade can be tested directly on the canvas.
-  previewOptions?: string[];
-  previewValue?: string;
-  onPreviewChange?: (value: string) => void;
+  // Live Local Dropdown preview: when provided, parent/child pairs render
+  // interactive so the dependent-option cascade can be tested on the canvas.
+  previewValues?: Record<number, Record<string, string>>;
+  onPreviewChange?: (elId: number, key: string, value: string) => void;
 }) {
   const t = element.type;
   const opts = element.options && element.options.length > 0 ? element.options : DEFAULT_OPTIONS;
@@ -816,34 +816,36 @@ function FieldRenderer({
       </div>
     );
   } else if (t === 'single_dropdown' || t === 'multi_dropdown' || t === 'select') {
-    const live = !editable && !!onPreviewChange;
     control = (
       <select
-        disabled={!live}
-        {...(live
-          ? {
-              value: previewValue ?? '',
-              onChange: (e: React.ChangeEvent<HTMLSelectElement>) =>
-                onPreviewChange?.(e.target.value),
-            }
-          : {})}
-        className={`w-full px-3 py-2 border border-slate-300 rounded-md text-xs ${
-          live
-            ? 'bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer'
-            : 'bg-slate-50/50 text-slate-500 cursor-pointer'
-        }`}
+        disabled
+        className="w-full px-3 py-2 border border-slate-300 rounded-md text-xs bg-slate-50/50 text-slate-500 cursor-pointer"
       >
-        {live ? (
-          <option value="">{element.placeholder || 'Select an option'}</option>
-        ) : (
-          <option>{element.placeholder || 'Select an option'}</option>
-        )}
-        {(previewOptions ?? opts).map((o) => (
+        <option>{element.placeholder || 'Select an option'}</option>
+        {opts.map((o) => (
           <option key={o} value={o}>
             {o}
           </option>
         ))}
       </select>
+    );
+  } else if (t === 'local_dropdown') {
+    const rows = element.rows ?? [];
+    const rowValues = previewValues?.[element.id];
+    const live = !editable && !!onPreviewChange && rows.length > 0;
+    control = (
+      <LocalDropdownRowsField
+        rows={rows}
+        values={rowValues}
+        disabledChildren={!live}
+        onChange={
+          live
+            ? (key, value) => {
+                onPreviewChange?.(element.id, key, value);
+              }
+            : undefined
+        }
+      />
     );
   } else if (t === 'checkbox') {
     control = (
@@ -1243,8 +1245,9 @@ function FormsDashboard() {
   const [draggedCanvasIndex, setDraggedCanvasIndex] = useState<number | null>(null);
   const [isDraggingOverCanvas, setIsDraggingOverCanvas] = useState(false);
 
-  // Live values chosen on the canvas for testing dropdown logic. Keyed by element id.
-  const [previewValues, setPreviewValues] = useState<Record<number, string>>({});
+  // Live values chosen on the canvas for testing Local Dropdown pairs.
+  // Keyed by element id -> `parent:<rowId>` / `child:<rowId>`.
+  const [previewValues, setPreviewValues] = useState<Record<number, Record<string, string>>>({});
 
   const [openMenuFor, setOpenMenuFor] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -1597,6 +1600,7 @@ function FormsDashboard() {
       },
       CHOICE_TYPES.includes(item.type) ? DEFAULT_OPTIONS : undefined
     );
+    if (item.type === 'local_dropdown') newEl.rows = [defaultLocalRow()];
     setActiveForm((prev) => ({ ...prev, elements: [...prev.elements, newEl] }));
     setSelectedElement(newEl);
     triggerToast(`Added ${item.label} field`);
@@ -1605,14 +1609,9 @@ function FormsDashboard() {
   const removeElement = (id: number) => {
     setActiveForm((prev) => ({
       ...prev,
-      elements: prev.elements
-        .filter((e) => e.id !== id)
-        .map((e) => (e.logic && e.logic.dependsOn === id ? { ...e, logic: undefined } : e)),
+      elements: prev.elements.filter((e) => e.id !== id),
     }));
     if (selectedElement && selectedElement.id === id) setSelectedElement(null);
-    if (selectedElement?.logic?.dependsOn === id) {
-      setSelectedElement((prev) => (prev ? { ...prev, logic: undefined } : prev));
-    }
     setPreviewValues((p) => {
       const n = { ...p };
       delete n[id];
@@ -1652,6 +1651,7 @@ function FormsDashboard() {
       },
       CHOICE_TYPES.includes(item.type) ? DEFAULT_OPTIONS : undefined
     );
+    if (item.type === 'local_dropdown') newEl.rows = [defaultLocalRow()];
     setActiveForm((prev) => {
       const next = [...prev.elements];
       next.splice(targetIndex, 0, newEl);
@@ -1715,21 +1715,25 @@ function FormsDashboard() {
     setSelectedElement((prev) => (prev ? { ...prev, ...patch } : prev));
   };
 
-  /** Canvas live-preview: pick a dropdown value, cascade dependent options below. */
-  const handlePreviewValueChange = (elId: number, value: string) => {
+  /** Canvas live-preview for Local Dropdown parent/child pairs. Keyed by `kind:rowId`. */
+  const handlePreviewValueChange = (elId: number, key: string, value: string) => {
     setPreviewValues((prev) => {
-      const next = { ...prev, [elId]: value };
-      activeForm.elements.forEach((dep) => {
-        if (dep.logic && dep.logic.dependsOn === elId) {
-          const opts = resolveDropdownOptions(
-            dep.logic,
-            dep.options,
-            activeForm.elements,
-            (id) => next[id]
-          );
-          if (next[dep.id] && !opts.includes(next[dep.id])) delete next[dep.id];
+      const next = { ...prev };
+      next[elId] = next[elId] ?? {};
+      const el = activeForm.elements.find((e) => e.id === elId);
+      const rowId = Number(key.split(':')[1]);
+      const row = el?.rows?.find((r) => r.id === rowId);
+      if (key.startsWith('parent:')) {
+        // Parent changed: drop a stale child value that's no longer in the mapped options.
+        next[elId]['parent:' + rowId] = value;
+        const childKey = 'child:' + rowId;
+        if (next[elId][childKey] && row) {
+          const opts = childOptionsFor(row, value);
+          if (!opts.includes(next[elId][childKey])) delete next[elId][childKey];
         }
-      });
+      } else {
+        next[elId][key] = value;
+      }
       return next;
     });
   };
@@ -1766,6 +1770,13 @@ function FormsDashboard() {
       ...selectedElement,
       id: Date.now() + Math.random(),
       label: `${selectedElement.label} (Copy)`,
+      rows: selectedElement.rows
+        ? selectedElement.rows.map((r) => ({
+            ...r,
+            id: Date.now() + Math.random(),
+            rules: (r.rules ?? []).map((rul) => ({ ...rul, id: Date.now() + Math.random() })),
+          }))
+        : undefined,
     };
     setActiveForm((prev) => {
       const idx = prev.elements.findIndex((e) => e.id === selectedElement.id);
@@ -1792,7 +1803,7 @@ function FormsDashboard() {
         required: el.required,
         placeholder: el.placeholder,
         options: el.options,
-        logic: el.logic,
+        rows: el.rows,
         buttonColor: el.type === 'button' ? el.buttonColor : undefined,
         buttonTextColor: el.type === 'button' ? el.buttonTextColor : undefined,
       })),
@@ -1844,7 +1855,7 @@ function FormsDashboard() {
             required: el.required,
             placeholder: el.placeholder,
             options: el.options,
-            logic: el.logic,
+            rows: el.rows,
             buttonColor: el.type === 'button' ? el.buttonColor : undefined,
             buttonTextColor: el.type === 'button' ? el.buttonTextColor : undefined,
           })),
@@ -2041,7 +2052,7 @@ function FormsDashboard() {
             required: el.required,
             placeholder: el.placeholder,
             options: el.options,
-            logic: el.logic,
+            rows: el.rows,
             buttonColor: el.type === 'button' ? el.buttonColor : undefined,
             buttonTextColor: el.type === 'button' ? el.buttonTextColor : undefined,
           })),
@@ -3257,23 +3268,7 @@ function FormsDashboard() {
                   }
                 >
                   {activeForm.elements.map((element, index) => {
-                    const controllerForLogic =
-                      activeForm.elements.find((e) => e.id === element.logic?.dependsOn) ??
-                      activeForm.elements.find((e) => e.label === element.logic?.dependsOnLabel);
-                    const isLogicDependent = !!element.logic;
-                    const isLogicController = activeForm.elements.some(
-                      (e) => e.logic?.dependsOn === element.id
-                    );
-                    const livePreview = isLogicDependent || isLogicController;
-                    const previewLiveOptions = livePreview
-                      ? resolveDropdownOptions(
-                          element.logic,
-                          element.options,
-                          activeForm.elements,
-                          (id) => previewValues[id],
-                          DEFAULT_OPTIONS
-                        )
-                      : undefined;
+                    const live = element.type === 'local_dropdown';
                     return (
                     <div
                       key={element.id}
@@ -3358,24 +3353,13 @@ function FormsDashboard() {
                         onAddOption={addInlineOption}
                         onEditOption={updateInlineOption}
                         onRemoveOption={removeInlineOption}
-                        previewOptions={previewLiveOptions}
-                        previewValue={livePreview ? previewValues[element.id] ?? '' : undefined}
+                        previewValues={previewValues}
                         onPreviewChange={
-                          livePreview
-                            ? (v) => handlePreviewValueChange(element.id, v)
+                          live
+                            ? (elId, key, v) => handlePreviewValueChange(elId, key, v)
                             : undefined
                         }
                       />
-
-                      {element.logic && (
-                        <div className="mt-2 flex items-center gap-1.5 text-[10px] font-medium text-blue-600 bg-blue-50 border border-blue-100 rounded px-2 py-1">
-                          <FaLink className="w-2.5 h-2.5 flex-shrink-0" />
-                          <span>
-                            Dynamic options — options change based on{' '}
-                            <strong>{controllerForLogic?.label ?? 'a removed field'}</strong>.
-                          </span>
-                        </div>
-                      )}
 
                       {selectedElement?.id === element.id && (
                         <InlineFieldEditor
@@ -3452,14 +3436,13 @@ function FormsDashboard() {
                     }
                   />
 
-                  {isLogicDropdownType(selectedElement.type) && (
-                    <DropdownLogicSettings
+                  {selectedElement.type === 'local_dropdown' && (
+                    <LocalDropdownSettings
                       key={selectedElement.id}
-                      element={selectedElement}
-                      allElements={activeForm.elements}
-                      onChange={(logic) =>
+                      rows={selectedElement.rows ?? []}
+                      onChange={(rows) =>
                         setSelectedElement((prev) =>
-                          prev ? { ...prev, logic: logic ?? undefined } : prev
+                          prev ? { ...prev, rows } : prev
                         )
                       }
                     />

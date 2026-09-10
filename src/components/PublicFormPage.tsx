@@ -7,7 +7,7 @@ import { deserializeFormFromUrl, type PublicFormPayload } from '../utils';
 import { recordFormSubmission } from '../data/formsStore';
 import { useAuth } from '../auth';
 import { navigate } from '../router';
-import { resolveDropdownOptions, type DropdownLogic } from './DropdownLogicSettings';
+import { LocalDropdownRowsField, childOptionsFor, type LocalDropdownRow } from './LocalDropdownSettings';
 
 const DEFAULT_OPTIONS = ['Option 1', 'Option 2', 'Option 3'];
 
@@ -63,7 +63,7 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
               placeholder: el.placeholder as string | undefined,
               options: el.options as string[] | undefined,
               id: (el.id as number | undefined) ?? undefined,
-              logic: el.logic as DropdownLogic | undefined,
+              rows: el.rows as LocalDropdownRow[] | undefined,
               buttonColor:
                 el.type === 'button' ? (el.buttonColor as string | undefined) : undefined,
               buttonTextColor:
@@ -91,26 +91,19 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
     setValues((p) => {
       const next = { ...p, [label]: value };
       if (!form) return next;
-      // If the changed field is the controller of some dependent dropdown, drop the
-      // dependent's current value whenever it's no longer a valid option.
-      const changed = form.elements.find((e) => e.label === label);
-      if (changed) {
-        for (const dep of form.elements) {
-          const depends =
-            (changed.id !== undefined && dep.logic?.dependsOn === changed.id) ||
-            (changed.id === undefined && dep.logic?.dependsOnLabel === changed.label);
-          if (!depends) continue;
-          const opts = resolveDropdownOptions(
-            dep.logic,
-            dep.options,
-            form.elements,
-            (id) => {
-              const c = form.elements.find((e) => e.id === id);
-              return c ? next[c.label] : undefined;
-            },
-            DEFAULT_OPTIONS
-          );
-          if (next[dep.label] && !opts.includes(next[dep.label])) delete next[dep.label];
+      // Local Dropdown: parent changed -> drop a stale child value that is no
+      // longer a valid option for the newly selected parent value.
+      const parentMatch = label.match(/^parent:(\d+)$/);
+      if (parentMatch && (form.elements ?? []).some((el) => el.type === 'local_dropdown')) {
+        const rowId = Number(parentMatch[1]);
+        for (const el of form.elements) {
+          const row = (el.rows ?? []).find((r) => r.id === rowId);
+          if (row) {
+            const childKey = `child:${rowId}`;
+            const opts = childOptionsFor(row, value);
+            if (next[childKey] && !opts.includes(next[childKey])) delete next[childKey];
+            break;
+          }
         }
       }
       return next;
@@ -124,20 +117,10 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
     }
   };
 
-  /** Resolve the options a dropdown should show right now (respecting dropdown logic). */
+  /** Resolve the options a dropdown should show right now. Plain dropdowns use
+   *  their own Options list; Local Dropdown rows resolve via parent mapping. */
   const optionsFor = (el: PublicFormPayload['elements'][number]) =>
-    form
-      ? resolveDropdownOptions(
-          el.logic,
-          el.options,
-          form.elements,
-          (id) => {
-            const c = form.elements.find((e) => e.id === id);
-            return c ? values[c.label] ?? undefined : undefined;
-          },
-          DEFAULT_OPTIONS
-        )
-      : [...DEFAULT_OPTIONS];
+    el.options && el.options.length > 0 ? [...el.options] : [...DEFAULT_OPTIONS];
 
   /** Border/ring classes turn rose + show an error for required fields left empty. */
   const inputClass = (label: string) =>
@@ -204,6 +187,16 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
     const errs: Record<string, string> = {};
     for (const el of form.elements) {
       if (el.type === 'button') continue;
+      if (el.type === 'local_dropdown') {
+        if (!el.required) continue;
+        for (const row of el.rows ?? []) {
+          if (!(values[`parent:${row.id}`] ?? '').trim() || !(values[`child:${row.id}`] ?? '').trim()) {
+            errs[el.label] = 'Every parent/child pair is required';
+            break;
+          }
+        }
+        continue;
+      }
       if (el.required && !(values[el.label] ?? '').trim()) {
         errs[el.label] =
           el.type === 'checkbox' || el.type === 'radio' || el.type === 'tnc'
@@ -241,6 +234,15 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
       const filled: Record<string, string> = {};
       for (const el of form.elements) {
         if (el.type === 'button') continue;
+        if (el.type === 'local_dropdown') {
+          for (const row of el.rows ?? []) {
+            const p = values[`parent:${row.id}`];
+            const c = values[`child:${row.id}`];
+            if (p && p.trim()) filled[`${el.label} · ${row.parentLabel}`] = p.trim();
+            if (c && c.trim()) filled[`${el.label} · ${row.childLabel}`] = c.trim();
+          }
+          continue;
+        }
         const v = values[el.label];
         if (v && v.trim()) filled[el.label] = v.trim();
       }
@@ -454,6 +456,17 @@ export default function PublicFormPage({ data, formId }: { data?: string; formId
                             </option>
                           ))}
                         </select>
+                        {fieldErrors[el.label] && (
+                          <p className="text-xs text-rose-600 mt-1">{fieldErrors[el.label]}</p>
+                        )}
+                      </>
+                    ) : el.type === 'local_dropdown' ? (
+                      <>
+                        <LocalDropdownRowsField
+                          rows={el.rows ?? []}
+                          values={values}
+                          onChange={(key, value) => updateValue(key, value)}
+                        />
                         {fieldErrors[el.label] && (
                           <p className="text-xs text-rose-600 mt-1">{fieldErrors[el.label]}</p>
                         )}

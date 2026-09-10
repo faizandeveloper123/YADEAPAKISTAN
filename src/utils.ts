@@ -1,6 +1,6 @@
 import type { Contact, FormSubmissionData } from './types';
 import type { ApiContact } from './api';
-import type { DropdownLogic } from './components/DropdownLogicSettings';
+import type { LocalDropdownRow } from './components/LocalDropdownSettings';
 import { api, API_BASE } from './api';
 import type { AppliedFilter, FilterRule } from './data/smartListOptions';
 
@@ -24,8 +24,8 @@ export interface PublicFormPayload {
     required: boolean;
     placeholder?: string;
     options?: string[];
-    /** Dependent-dropdown logic (controlling field + option mappings). */
-    logic?: DropdownLogic;
+    /** Local Dropdown rows (parent/child dropdown pairs). */
+    rows?: LocalDropdownRow[];
     buttonColor?: string;
     buttonTextColor?: string;
   }[];
