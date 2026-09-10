@@ -1,4 +1,4 @@
-name: Deploy Yadea Pakistan to Production (yadea.biztrack.uk)
+name: Deploy to yadea.biztrack.uk
 
 on:
   push:
@@ -6,73 +6,144 @@ on:
       - main
   workflow_dispatch:
 
-concurrency:
-  group: yadea-deploy
-  cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check SSH secret is configured
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Write SMTP secrets
+        env:
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
-          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-            echo "::error::SSH_PRIVATE_KEY secret is missing. Add the private key (yadea-deploy) to repository secrets first."
-            exit 1
+          if [ -n "$SMTP_PASS" ]; then
+            printf "<?php\ndefine('SMTP_PASS', '%s');\n" "$SMTP_PASS" > api/mail_secrets.php
           fi
 
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Deploy dist + api (non-destructive, yadea.biztrack.uk only)
+      - name: Deploy to 81.17.101.93 (yadea.biztrack.uk)
         env:
-          SERVER_HOST: "81.17.101.93"
-          SERVER_USER: "root"
-          TARGET: "/var/www/yadea-pakistan"
+          SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -l -f ~/.ssh/deploy_key
+
+          ssh-keyscan -H 81.17.101.93 >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Step 1: Create MySQL user if needed (MariaDB root uses unix_socket auth)
+          ssh -i ~/.ssh/deploy_key root@81.17.101.93 bash << 'SERVERFIX'
           set -e
-          HOST="${SERVER_HOST}"
-          USER="${SERVER_USER}"
-          BASE="${TARGET}"
-          ssh -o StrictHostKeyChecking=no "${USER}@${HOST}" "BASE='${BASE}' bash" << 'ENDSSH'
-            set -euo pipefail
-            mkdir -p "${BASE}/dist" "${BASE}/api"
-            echo "Ready to receive files on ${BASE}"
-          ENDSSH
+          # Try creating user (ignore error if exists)
+          mysql -u root -e "
+            CREATE USER IF NOT EXISTS 'evee'@'localhost' IDENTIFIED BY 'EveeCrm2026!';
+            GRANT ALL PRIVILEGES ON evee_crm.* TO 'evee'@'localhost';
+            FLUSH PRIVILEGES;
+          " 2>/dev/null || echo "User creation skipped (may already exist)"
+          # Verify the user works
+          mysql -u evee -p'EveeCrm2026!' evee_crm -e "SELECT COUNT(*) AS ok FROM contacts" && echo "DB_USER_OK" || echo "DB_USER_FAIL"
+          SERVERFIX
 
-          # Static SPA build -> dist (build files only; config/DB/nginx untouched)
-          rsync -avz --delete \
-            -e "ssh -o StrictHostKeyChecking=no" \
-            dist/ "${USER}@${HOST}:${BASE}/dist/"
+          # Step 2: Package files
+          rm -rf /tmp/site && mkdir -p /tmp/site
+          cp -r dist/* /tmp/site/
+          cp -r api /tmp/site/api
+          tar -czf /tmp/site.tar.gz -C /tmp/site .
 
-          # PHP API -> api (NO --delete; live credential files are never overwritten)
-          rsync -avz \
-            --exclude='config.php' \
-            --exclude='mail_secrets.php' \
-            --exclude='mail_config.php' \
-            -e "ssh -o StrictHostKeyChecking=no" \
-            api/ "${USER}@${HOST}:${BASE}/api/"
+          # Step 3: Backup mail config on server
+          ssh -i ~/.ssh/deploy_key root@81.17.101.93 '
+            cp /var/www/yadea-pakistan/api/mail_config.php /tmp/mail_backup.php 2>/dev/null || true
+          '
 
-          # Restore ownership/permissions so PHP-FPM (www-data) can read everything
-          ssh -o StrictHostKeyChecking=no "${USER}@${HOST}" "BASE='${BASE}' bash" << 'ENDSSH'
-            set -euo pipefail
-            find "${BASE}/dist" -type f -exec chmod 644 {} +
-            find "${BASE}/dist" -type d -exec chmod 755 {} +
-            find "${BASE}/api" -type f -exec chmod 644 {} +
-            find "${BASE}/api" -type d -exec chmod 755 {} +
-            chown -R www-data:www-data "${BASE}/dist" "${BASE}/api"
-            echo "Ownership and permissions restored"
-          ENDSSH
-          echo "Deploy to yadea.biztrack.uk completed"
+          # Step 4: Upload
+          scp -i ~/.ssh/deploy_key /tmp/site.tar.gz root@81.17.101.93:/tmp/site.tar.gz
 
-      - name: Verify yadea.biztrack.uk is up
-        run: |
+          # Step 5: Extract, fix DB creds in config.php, restore mail, restart PHP-FPM
+          ssh -i ~/.ssh/deploy_key root@81.17.101.93 bash << 'SERVERDEPLOY'
           set -e
-          curl -sf -o /dev/null -w "yadea.biztrack.uk HTTP %{http_code}\n" https://yadea.biztrack.uk/
-          curl -sf -o /dev/null -w "yadea.biztrack.uk assets HTTP %{http_code}\n" https://yadea.biztrack.uk/assets/index-BaQJkLeH.js
-          echo "Site verification passed"
+          rm -rf /var/www/yadea-pakistan/dist
+          mkdir -p /var/www/yadea-pakistan/dist
+          tar -xzf /tmp/site.tar.gz -C /var/www/yadea-pakistan/dist/
+          rm -rf /var/www/yadea-pakistan/api
+          mv /var/www/yadea-pakistan/dist/api /var/www/yadea-pakistan/api
+          cp /tmp/mail_backup.php /var/www/yadea-pakistan/api/mail_config.php 2>/dev/null || true
+
+          # Fix DB credentials in config.php (replace XAMPP defaults with production values)
+          sed -i "s/define('DB_USER',.*$/define('DB_USER', getenv('DB_USER') ?: 'evee');/" /var/www/yadea-pakistan/api/config.php
+          sed -i "s/define('DB_PASS',.*$/define('DB_PASS', getenv('DB_PASS') ?: 'EveeCrm2026!');/" /var/www/yadea-pakistan/api/config.php
+
+          chown -R www-data:www-data /var/www/yadea-pakistan
+          rm -f /tmp/site.tar.gz /tmp/mail_backup.php
+          systemctl reload php8.3-fpm
+          echo DEPLOY_OK
+          SERVERDEPLOY
+
+          # Step 6: Ensure nginx serves the built SPA assets under /Yadea/ too.
+          # The SPA is built with base './' and served at the site root by nginx
+          # (root /var/www/yadea-pakistan/dist), but the same build must also work
+          # when the page is opened at https://yadea.biztrack.uk/Yadea/ (the URL the
+          # CRM has shipped under). At that path a relative reference ./assets/*.js
+          # resolves to /Yadea/assets/* — nginx only routes /Yadea/api/ to PHP, so
+          # those asset requests fall through to the SPA catch-all and come back as
+          # index.html instead of the real JS/CSS, and the app never boots.
+          # Add a plain prefix location that aliases /Yadea/ onto the dist folder;
+          # the regex locations for /Yadea/api/index.php and /Yadea/api/*.php are
+          # still evaluated first (nginx checks regex before non-^~ prefixes), so the
+          # API keeps working unchanged.
+          ssh -i ~/.ssh/deploy_key root@81.17.101.93 bash << 'NGINXFIX'
+          set -e
+          CFG=/etc/nginx/sites-enabled/biztrack-yadea
+          cp "$CFG" /tmp/biztrack-yadea.bak
+
+          if grep -q "# yadea static assets (managed by deploy)" "$CFG"; then
+              echo NGINX_ALREADY_PATCHED
+          else
+              # writes the snippet, then python inserts it before "location /"
+              cat > /tmp/yadea-location.conf << 'BLOCK'
+          # yadea static assets (managed by deploy)
+          location /Yadea/ {
+              alias /var/www/yadea-pakistan/dist/;
+              index index.html;
+              try_files $uri $uri/ /index.html;
+          }
+
+          BLOCK
+              python3 - "$CFG" /tmp/yadea-location.conf << 'PY'
+          import sys
+          path, snip = sys.argv[1], sys.argv[2]
+          with open(snip, encoding='utf-8') as f:
+              block = f.read()
+          with open(path, encoding='utf-8') as f:
+              lines = f.readlines()
+          for i, line in enumerate(lines):
+              if line.strip().startswith('location / {'):
+                  lines[i:i] = [block]
+                  break
+          with open(path, 'w', encoding='utf-8') as f:
+              f.writelines(lines)
+          PY
+              rm -f /tmp/yadea-location.conf
+              echo NGINX_PATCHED
+          fi
+
+          nginx -t && systemctl reload nginx || { cp /tmp/biztrack-yadea.bak "$CFG"; nginx -t && systemctl reload nginx; rm -f /tmp/biztrack-yadea.bak; echo NGINX_REVERTED; exit 1; }
+          rm -f /tmp/biztrack-yadea.bak
+          echo NGINX_OK
+          NGINXFIX
