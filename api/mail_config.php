@@ -37,6 +37,23 @@ if (!defined('SMTP_PASS')) {
     define('SMTP_PASS', (string)getenv('SMTP_PASS')); // empty until secrets are provided
 }
 
+/**
+ * Wire OpenSSL's CA store so encrypted SMTP (verify_peer ON) succeeds on
+ * stock XAMPP, whose php.ini leaves openssl.cafile empty and curl.cainfo
+ * pointed at a bundle Apache does not actually expose to PHP. Without this
+ * PHPMailer aborts the TLS handshake with "Could not connect to SMTP host",
+ * so no message ever leaves the box.
+ */
+$ca_bundle = __DIR__ . '/lib/cacert.pem';
+if (is_file($ca_bundle)) {
+    if (ini_set('openssl.cafile', $ca_bundle) === false) {
+        // ini_set banned (hardened host): fall back to env vars that the
+        // openssl stream wrapper honours on most builds.
+        putenv('SSL_CERT_FILE=' . $ca_bundle);
+        putenv('CURL_CA_BUNDLE=' . $ca_bundle);
+    }
+}
+
 define('MAIL_FROM_NAME', getenv('MAIL_FROM_NAME') ?: 'Yadea Pakistan');
 
 /** Public site URL used in email links (no trailing slash). */
