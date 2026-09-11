@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { logActivity } from '../data/activityLog';
 import { useCampaigns } from '../data/campaigns';
@@ -600,19 +600,65 @@ const SUBMISSION_COLUMNS: SubmissionColumn[] = [
   { key: 'phone', label: 'Phone', locked: false, visible: true },
 ];
 
+/** Expand local_dropdown elements into their individual parent/child value keys. */
+function formValueKeys(elements: FormElement[]): string[] {
+  const keys: string[] = [];
+  for (const el of elements) {
+    if (el.type === 'button') continue;
+    if (el.type === 'local_dropdown') {
+      for (const row of el.rows ?? []) {
+        if (row.parentLabel) {
+          const k = `${el.label} · ${row.parentLabel}`;
+          if (!keys.includes(k)) keys.push(k);
+        }
+        if (row.childLabel) {
+          const k = `${el.label} · ${row.childLabel}`;
+          if (!keys.includes(k)) keys.push(k);
+        }
+      }
+      continue;
+    }
+    keys.push(el.label);
+  }
+  return keys;
+}
+
 /** Build the submission table columns: fixed identity columns + the selected form's field labels. */
-function submissionColumnsFor(formName: string, registeredForms: StoredForm[]): SubmissionColumn[] {
+function submissionColumnsFor(
+  formName: string,
+  registeredForms: StoredForm[],
+  serverForms: Form[],
+  rows: SubmissionRow[],
+): SubmissionColumn[] {
   const fixed = SUBMISSION_COLUMNS.filter((c) =>
     ['formName', 'submittedAt', 'contact', 'fullName', 'email', 'phone'].includes(c.key)
   );
   const names = formName === 'all' ? registeredForms.map((f) => f.name) : [formName];
   const labels: string[] = [];
   for (const n of names) {
-    const f = registeredForms.find((x) => x.name === n);
-    if (!f) continue;
-    for (const el of f.elements) {
-      if (el.type === 'button') continue;
-      if (!labels.includes(el.label)) labels.push(el.label);
+    // 1) Field labels from the form definition (server forms carry full detail
+    //    incl. local_dropdown sub-fields; stored forms only carry bare labels).
+    const server = serverForms.find((f) => f.name === n);
+    if (server) {
+      for (const k of formValueKeys(server.elements)) {
+        if (!labels.includes(k)) labels.push(k);
+      }
+    } else {
+      const f = registeredForms.find((x) => x.name === n);
+      if (f) {
+        for (const el of f.elements) {
+          if (el.type === 'button') continue;
+          if (!labels.includes(el.label)) labels.push(el.label);
+        }
+      }
+    }
+    // 2) Union with actual stored submission values so no submitted data column
+    //    (e.g. City · Select City) is ever missing.
+    for (const r of rows) {
+      if (r.formName !== n) continue;
+      for (const key of Object.keys(r.values)) {
+        if (!labels.includes(key)) labels.push(key);
+      }
     }
   }
   return [...fixed, ...labels.map((label) => ({ key: label, label, locked: false, visible: true }))];
@@ -1279,6 +1325,27 @@ function FormsDashboard() {
   // dropdown and the table columns.
   const registeredForms = useForms();
 
+  // Merge server-persisted builder forms with submission-registered forms so
+  // every created form appears in the filter dropdown and powers the columns.
+  const allRegisteredForms = useMemo<StoredForm[]>(() => {
+    const byName = new Map<string, StoredForm>();
+    for (const f of registeredForms) {
+      byName.set(f.name, {
+        id: f.id,
+        name: f.name,
+        elements: f.elements.map((el) => ({ label: el.label, type: el.type })),
+      });
+    }
+    for (const f of forms) {
+      byName.set(f.name, {
+        id: `form-${f.name}`,
+        name: f.name,
+        elements: f.elements.map((el) => ({ label: el.label, type: el.type })),
+      });
+    }
+    return Array.from(byName.values());
+  }, [registeredForms, forms]);
+
   // ---- Server persistence: load every saved builder form on mount ----
   useEffect(() => {
     let cancelled = false;
@@ -1378,8 +1445,8 @@ function FormsDashboard() {
 
   // Rebuild the visible columns whenever the selected form changes.
   useEffect(() => {
-    setSubmissionCols(submissionColumnsFor(submissionFormFilter, registeredForms));
-  }, [submissionFormFilter, registeredForms]);
+    setSubmissionCols(submissionColumnsFor(submissionFormFilter, allRegisteredForms, forms, submissionRows));
+  }, [submissionFormFilter, allRegisteredForms, forms, submissionRows]);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -2422,7 +2489,7 @@ function FormsDashboard() {
                           className="bg-white border border-slate-300 text-slate-700 text-xs rounded-md pl-3 pr-8 py-2 font-medium focus:outline-none focus:border-blue-500 shadow-xs appearance-none cursor-pointer"
                         >
                           <option value="all">All Forms</option>
-                          {registeredForms.map((f) => (
+                          {allRegisteredForms.map((f) => (
                             <option key={f.id} value={f.name}>
                               {f.name}
                             </option>
