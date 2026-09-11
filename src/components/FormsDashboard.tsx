@@ -639,7 +639,16 @@ function formValueKeys(elements: FormElement[]): { key: string; label: string }[
   return keys;
 }
 
-/** Build the submission table columns: fixed identity columns + the selected form's field labels. */
+/** Fields already covered by the fixed identity columns — never duplicated as dynamic columns. */
+const RESERVED_FIELD_RE =
+  /^(form|submitted\s*at|submission\s*date|contact|full\s*name|name|email|phone)$/i;
+
+/**
+ * Build the submission table columns: fixed identity columns + the selected
+ * form's own fields. "All Forms" keeps just the identity columns so the
+ * combined view stays clean; picking a specific form shows only that form's
+ * fields (incl. City/Outlet sub-fields) plus any value actually stored for it.
+ */
 function submissionColumnsFor(
   formName: string,
   registeredForms: StoredForm[],
@@ -648,35 +657,37 @@ function submissionColumnsFor(
 ): SubmissionColumn[] {
   const fixed = SUBMISSION_COLUMNS.filter((c) =>
     ['formName', 'submittedAt', 'contact', 'fullName', 'email', 'phone'].includes(c.key)
-  );
-  const names = formName === 'all' ? registeredForms.map((f) => f.name) : [formName];
+  ).map((c) => ({ ...c }));
+
+  if (formName === 'all') return fixed;
+
   const cols: { key: string; label: string }[] = [];
-  const addKey = (key: string, label?: string) => {
+  const add = (key: string, label?: string) => {
+    if (RESERVED_FIELD_RE.test(key)) return;
     if (cols.some((c) => c.key === key)) return;
     cols.push({ key, label: label ?? keyToDisplayLabel(key) });
   };
-  for (const n of names) {
-    // 1) Field labels from the form definition (server forms carry full detail
-    //    incl. local_dropdown sub-fields; stored forms only carry bare labels).
-    const server = serverForms.find((f) => f.name === n);
-    if (server) {
-      for (const k of formValueKeys(server.elements)) addKey(k.key, k.label);
-    } else {
-      const f = registeredForms.find((x) => x.name === n);
-      if (f) {
-        for (const el of f.elements) {
-          if (el.type === 'button' || el.type === 'local_dropdown') continue;
-          addKey(el.label);
-        }
-      }
-    }
-    // 2) Union with actual stored submission values so no submitted data column
-    //    (e.g. Outlet · Select City) is ever missing.
-    for (const r of rows) {
-      if (r.formName !== n) continue;
-      for (const key of Object.keys(r.values)) addKey(key);
+
+  // 1) Columns from the selected form's own definition (server forms carry
+  //    full detail incl. local_dropdown sub-fields; stored forms bare labels).
+  const server = serverForms.find((f) => f.name === formName);
+  if (server) {
+    for (const k of formValueKeys(server.elements)) add(k.key, k.label);
+  } else {
+    const f = registeredForms.find((x) => x.name === formName);
+    for (const el of f?.elements ?? []) {
+      if (el.type === 'button' || el.type === 'local_dropdown') continue;
+      add(el.label);
     }
   }
+
+  // 2) Any value actually stored for this form that the definition does not
+  //    declare (guarantees the table always shows every submitted field).
+  for (const r of rows) {
+    if (r.formName !== formName) continue;
+    for (const key of Object.keys(r.values)) add(key);
+  }
+
   return [...fixed, ...cols.map((c) => ({ key: c.key, label: c.label, locked: false, visible: true }))];
 }
 
