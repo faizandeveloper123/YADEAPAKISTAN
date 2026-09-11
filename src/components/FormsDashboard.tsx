@@ -600,25 +600,41 @@ const SUBMISSION_COLUMNS: SubmissionColumn[] = [
   { key: 'phone', label: 'Phone', locked: false, visible: true },
 ];
 
+/** Friendly display label for a local_dropdown column. */
+function localDropdownColumnLabel(elLabel: string, subLabel: string): string {
+  const sub = subLabel.trim().replace(/^select\s+/i, '');
+  if (sub.toLowerCase() === 'outlet') return elLabel;
+  return `${elLabel} ${sub}`.trim();
+}
+
+/** Parse a stored value key like "Outlet · Select City" back into a friendly column label. */
+function keyToDisplayLabel(key: string): string {
+  const sep = key.lastIndexOf(' · ');
+  if (sep <= 0) return key;
+  return localDropdownColumnLabel(key.slice(0, sep), key.slice(sep + 3));
+}
+
 /** Expand local_dropdown elements into their individual parent/child value keys. */
-function formValueKeys(elements: FormElement[]): string[] {
-  const keys: string[] = [];
+function formValueKeys(elements: FormElement[]): { key: string; label: string }[] {
+  const keys: { key: string; label: string }[] = [];
   for (const el of elements) {
     if (el.type === 'button') continue;
     if (el.type === 'local_dropdown') {
       for (const row of el.rows ?? []) {
         if (row.parentLabel) {
           const k = `${el.label} · ${row.parentLabel}`;
-          if (!keys.includes(k)) keys.push(k);
+          if (!keys.some((x) => x.key === k))
+            keys.push({ key: k, label: localDropdownColumnLabel(el.label, row.parentLabel) });
         }
         if (row.childLabel) {
           const k = `${el.label} · ${row.childLabel}`;
-          if (!keys.includes(k)) keys.push(k);
+          if (!keys.some((x) => x.key === k))
+            keys.push({ key: k, label: localDropdownColumnLabel(el.label, row.childLabel) });
         }
       }
       continue;
     }
-    keys.push(el.label);
+    keys.push({ key: el.label, label: el.label });
   }
   return keys;
 }
@@ -634,34 +650,34 @@ function submissionColumnsFor(
     ['formName', 'submittedAt', 'contact', 'fullName', 'email', 'phone'].includes(c.key)
   );
   const names = formName === 'all' ? registeredForms.map((f) => f.name) : [formName];
-  const labels: string[] = [];
+  const cols: { key: string; label: string }[] = [];
+  const addKey = (key: string, label?: string) => {
+    if (cols.some((c) => c.key === key)) return;
+    cols.push({ key, label: label ?? keyToDisplayLabel(key) });
+  };
   for (const n of names) {
     // 1) Field labels from the form definition (server forms carry full detail
     //    incl. local_dropdown sub-fields; stored forms only carry bare labels).
     const server = serverForms.find((f) => f.name === n);
     if (server) {
-      for (const k of formValueKeys(server.elements)) {
-        if (!labels.includes(k)) labels.push(k);
-      }
+      for (const k of formValueKeys(server.elements)) addKey(k.key, k.label);
     } else {
       const f = registeredForms.find((x) => x.name === n);
       if (f) {
         for (const el of f.elements) {
-          if (el.type === 'button') continue;
-          if (!labels.includes(el.label)) labels.push(el.label);
+          if (el.type === 'button' || el.type === 'local_dropdown') continue;
+          addKey(el.label);
         }
       }
     }
     // 2) Union with actual stored submission values so no submitted data column
-    //    (e.g. City · Select City) is ever missing.
+    //    (e.g. Outlet · Select City) is ever missing.
     for (const r of rows) {
       if (r.formName !== n) continue;
-      for (const key of Object.keys(r.values)) {
-        if (!labels.includes(key)) labels.push(key);
-      }
+      for (const key of Object.keys(r.values)) addKey(key);
     }
   }
-  return [...fixed, ...labels.map((label) => ({ key: label, label, locked: false, visible: true }))];
+  return [...fixed, ...cols.map((c) => ({ key: c.key, label: c.label, locked: false, visible: true }))];
 }
 
 function FieldRenderer({
