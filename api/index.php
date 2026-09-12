@@ -3081,6 +3081,22 @@ function create_submission(array $body): void
         ':created_by' => isset($body['created_by']) && (int)$body['created_by'] > 0 ? (int)$body['created_by'] : null,
     ]);
 
+    // Always acknowledge the person who filled in the form on THEIR email
+    // (the one they wrote into the form), not just on the CRM inbox side.
+    $subHtml = '<p style="margin:0 0 14px 0;font-size:14px;line-height:22px;color:#334155;">Thank you '
+        . htmlspecialchars(trim($f['name']), ENT_QUOTES, 'UTF-8') . ',</p>'
+        . '<p style="margin:0 0 16px 0;font-size:14px;line-height:22px;color:#334155;">We have received your '
+        . ($type === 'inquiry' ? 'inquiry' : 'dealership application')
+        . '. Our team will review it and get back to you shortly.</p>'
+        . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Your reference code is <strong style="color:#EB5F1B;">'
+        . htmlspecialchars((string)$code, ENT_QUOTES, 'UTF-8') . '</strong>.</p>';
+    send_app_mail(
+        (string)$f['email'],
+        trim($f['name']),
+        $type === 'inquiry' ? 'We received your inquiry' : 'We received your dealership application',
+        $subHtml
+    );
+
     $get = db()->prepare(
         'SELECT s.*, u.full_name AS assigned_to_name FROM portal_submissions s
          LEFT JOIN staff_users u ON u.id = s.assigned_to WHERE s.id = :id'
