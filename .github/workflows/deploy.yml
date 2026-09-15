@@ -67,6 +67,12 @@ jobs:
             GRANT ALL PRIVILEGES ON evee_crm.* TO 'evee'@'localhost';
             FLUSH PRIVILEGES;
           " 2>/dev/null || echo "User creation skipped (may already exist)"
+          # Widen staff_users.user_type if it is an ENUM that doesn't include
+          # 'Dealer' — the public dealer registration form inserts that value
+          # and MariaDB truncates/errors when it isn't in the allowed set.
+          mysql -u evee -p'EveeCrm2026!' evee_crm -e "
+            ALTER TABLE staff_users MODIFY COLUMN user_type VARCHAR(50) NOT NULL DEFAULT 'User';
+          " 2>/dev/null || echo "user_type widen skipped (may already be VARCHAR or no permission)"
           # Verify the user works
           mysql -u evee -p'EveeCrm2026!' evee_crm -e "SELECT COUNT(*) AS ok FROM contacts" && echo "DB_USER_OK" || echo "DB_USER_FAIL"
           SERVERFIX
