@@ -3097,6 +3097,64 @@ function create_submission(array $body): void
         $subHtml
     );
 
+    // Notify the CRM team: always drop a copy in the CRM mailbox and notify
+    // every Admin (portal bell + email), so a form submission never lands
+    // silently. The submitter's ack above is separate — this is the
+    // team-facing notification.
+    $esc = static fn ($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $label = $type === 'inquiry' ? 'Support inquiry' : 'Dealership application';
+    $who = $f['name'] !== '' ? $f['name'] : ($f['business_name'] !== '' ? $f['business_name'] : 'Unnamed submitter');
+
+    $rows = '';
+    $fieldRows = [
+        'Reference' => $code,
+        'Type' => $label,
+        'Name' => $f['name'],
+        'Email' => $f['email'],
+        'Phone' => $f['phone'],
+        'Business' => $f['business_name'],
+        'Address' => $f['address'],
+        'Years in business' => $f['years_in_business'],
+        'OEM dealer' => $f['oem_dealer'],
+        'Province' => $f['province'],
+        'City' => $f['city'],
+        'Property ownership' => $f['property_ownership'],
+        'Structure' => $f['structure'],
+        'Chassis number' => $f['chassis_number'],
+        'Order number' => $f['order_number'],
+        'Problem category' => $f['problem_category'],
+        'Reason / details' => $f['reason'],
+    ];
+    foreach ($fieldRows as $field => $value) {
+        if ($value === null || $value === '') continue;
+        $rows .= '<tr>'
+            . '<td style="padding:8px 12px;font-size:13px;color:#475569;white-space:nowrap;vertical-align:top;">' . $esc($field) . '</td>'
+            . '<td style="padding:8px 12px;font-size:13px;color:#1e293b;word-break:break-word;">' . $esc($value) . '</td>'
+            . '</tr>';
+    }
+
+    $notifyHtml = '<p style="margin:0 0 14px 0;font-size:14px;line-height:22px;color:#334155;">A new '
+        . $label . ' was just submitted from the website:</p>'
+        . '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin:0 0 16px 0;">'
+        . $rows . '</table>'
+        . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Open Customer Inquiries in the CRM to review, assign, and manage this submission.</p>';
+
+    if (defined('SMTP_USER') && SMTP_USER !== '') {
+        send_app_mail(
+            (string)SMTP_USER,
+            'Yadea Pakistan CRM',
+            ($type === 'inquiry' ? 'New inquiry ' : 'New dealership application ') . $code . ' — ' . $who,
+            $notifyHtml
+        );
+    }
+
+    $title = ($type === 'inquiry' ? 'New support inquiry ' : 'New dealership application ') . $code;
+    $detail = $who . ($f['city'] !== '' ? ', ' . $f['city'] : '') . ' (' . ($f['email'] !== '' ? $f['email'] : ($f['phone'] !== '' ? $f['phone'] : 'no contact info')) . ') — ' . $label . ' submitted. Open Customer Inquiries to review.';
+    $adminIds = db()->query("SELECT id FROM staff_users WHERE user_type = 'Admin'")->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($adminIds as $adminId) {
+        notify_staff((int)$adminId, null, $type === 'inquiry' ? 'inquiry_received' : 'application_received', $title, $detail);
+    }
+
     $get = db()->prepare(
         'SELECT s.*, u.full_name AS assigned_to_name FROM portal_submissions s
          LEFT JOIN staff_users u ON u.id = s.assigned_to WHERE s.id = :id'
