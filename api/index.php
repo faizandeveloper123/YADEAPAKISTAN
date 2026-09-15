@@ -847,13 +847,17 @@ function upsert_staff(array $body, ?int $existingId = null): int
 
     $pdo = db();
     $fullName = trim($firstName . ' ' . ($lastName ?? ''));
+    // Generated columns may not be assigned; let the DB compute full_name.
+    $setFullName = !staff_full_name_generated();
 
     if ($existingId !== null) {
         // manager_id is only touched when explicitly provided so a follower's
         // own profile edit never detaches them from their dealer.
         $hasManager = array_key_exists('manager_id', $body);
         $stmt = $pdo->prepare(
-            'UPDATE staff_users SET first_name = :fn, last_name = :ln, full_name = :full, email = :email, phone = :phone,
+            'UPDATE staff_users SET first_name = :fn, last_name = :ln'
+                    . ($setFullName ? ', full_name = :full' : '') .
+                    ', email = :email, phone = :phone,
                     extension = :ext, calendar = :cal, system_id = :sid, signature = :sig,
                     avatar_data = :avatar, restrict_data = :rd, user_type = :type'
                     . ($hasManager ? ', manager_id = :mgr' : '') .
@@ -864,7 +868,6 @@ function upsert_staff(array $body, ?int $existingId = null): int
         $params = [
             ':fn' => $firstName,
             ':ln' => $lastName,
-            ':full' => $fullName,
             ':email' => $email,
             ':phone' => $phone,
             ':ext' => $extension,
@@ -879,6 +882,7 @@ function upsert_staff(array $body, ?int $existingId = null): int
             ':cc' => encode_json_field($body['calendar_config'] ?? null),
             ':perm' => encode_json_field($body['permissions'] ?? null),
         ];
+        if ($setFullName) $params[':full'] = $fullName;
         if ($hasManager) $params[':mgr'] = $managerId;
         if ($password !== null) {
             $params[':password'] = $password;
@@ -896,18 +900,21 @@ function upsert_staff(array $body, ?int $existingId = null): int
     }
 
     $stmt = $pdo->prepare(
-        'INSERT INTO staff_users (first_name, last_name, full_name, email, phone, extension, calendar, system_id,
+        'INSERT INTO staff_users (first_name, last_name'
+                . ($setFullName ? ', full_name' : '') .
+                ', email, phone, extension, calendar, system_id,
                                   signature, avatar_data, restrict_data, user_type, manager_id,
                                   call_voicemail, availability, calendar_config, permissions'
-                                  . ($password !== null ? ', password, password_plain' : '') . ')
-         VALUES (:fn, :ln, :full, :email, :phone, :ext, :cal, :sid, :sig, :avatar, :rd, :type, :mgr,
+                                . ($password !== null ? ', password, password_plain' : '') . ')
+         VALUES (:fn, :ln'
+                . ($setFullName ? ', :full' : '') .
+                ', :email, :phone, :ext, :cal, :sid, :sig, :avatar, :rd, :type, :mgr,
                  :cv, :av, :cc, :perm'
-                 . ($password !== null ? ', :password, :ppassword' : '') . ')'
+                . ($password !== null ? ', :password, :ppassword' : '') . ')'
     );
     $insertParams = [
         ':fn' => $firstName,
         ':ln' => $lastName,
-        ':full' => $fullName,
         ':email' => $email,
         ':phone' => $phone,
         ':ext' => $extension,
@@ -1302,6 +1309,28 @@ function ensure_approval_column(): void
 }
 
 /**
+ * True when staff_users.full_name is a GENERATED column on this server. In
+ * that case INSERT/UPDATE must NOT supply a value for it (MariaDB errors with
+ * the value being "ignored"); the server computes it from first/last name.
+ * Schema-agnostic so local XAMPP and production stay in sync.
+ */
+function staff_full_name_generated(): bool
+{
+    static $gen = null;
+    if ($gen !== null) return $gen;
+    $gen = false;
+    try {
+        $col = db()->prepare("SHOW COLUMNS FROM staff_users LIKE 'full_name'");
+        $col->execute();
+        $row = $col->fetch();
+        $gen = $row !== false && stripos((string)($row['Extra'] ?? ''), 'generated') !== false;
+    } catch (Throwable $e) {
+        // Column/table missing or locked: fall back to explicit writes.
+    }
+    return $gen;
+}
+
+/**
  * Soft-delete support for contacts: DELETE always keeps the row, it just stamps
  * deleted_at so the live views hide it. Idempotent migration (safe to run on
  * every request) that (1) adds contacts.deleted_at when missing and (2) rebuilds
@@ -1608,20 +1637,25 @@ function register_dealer(array $body): void
 
     try {
         $ins = $pdo->prepare(
-            'INSERT INTO staff_users (first_name, last_name, full_name, email, phone, system_id,
+            'INSERT INTO staff_users (first_name, last_name'
+                    . (staff_full_name_generated() ? '' : ', full_name') .
+                    ', email, phone, system_id,
                                       user_type, restrict_data, password, password_plain, approved)
-             VALUES (:fn, :ln, :full, :email, :phone, :sid, \'Dealer\', 0, :p, :pp, 0)'
+             VALUES (:fn, :ln'
+                    . (staff_full_name_generated() ? '' : ', :full') .
+                    ', :email, :phone, :sid, \'Dealer\', 0, :p, :pp, 0)'
         );
-        $ins->execute([
+        $insParams = [
             ':fn' => $firstName,
             ':ln' => $lastName,
-            ':full' => trim($firstName . ' ' . $lastName),
             ':email' => $email,
             ':phone' => $phone,
             ':sid' => $systemId,
             ':p' => $hash,
             ':pp' => $plain,
-        ]);
+        ];
+        if (!staff_full_name_generated()) $insParams[':full'] = trim($firstName . ' ' . $lastName);
+        $ins->execute($insParams);
     } catch (PDOException $e) {
         if ($e->getCode() === '23000') {
             // Raced with another submission for the same email.

@@ -101,6 +101,10 @@ jobs:
           echo DEPLOY_OK
           SERVERDEPLOY
 
+          # Step 5: surface the mail debug log so delivery status (ok=1/0,
+          # FAIL/EXCEPTION lines) is visible right in the deploy output.
+          ssh -i ~/.ssh/deploy_key root@81.17.101.93 "tail -n 40 /var/www/yadea-pakistan/mail-debug.log 2>/dev/null || echo MAIL_LOG_EMPTY"
+
           # Step 6: Ensure nginx serves the built SPA assets under /Yadea/ too.
           # The SPA is built with base './' and served at the site root by nginx
           # (root /var/www/yadea-pakistan/dist), but the same build must also work
