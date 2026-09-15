@@ -283,7 +283,11 @@ function send_app_mail(string $to, string $toName, string $subject, string $body
         $mail->Body = $html;
         $mail->AltBody = email_plain_text($bodyHtml);
 
-        return $mail->send();
+        $ok = $mail->send();
+        if (!$ok) {
+            error_log('[Evee CRM] Mail to ' . $to . ' failed: ' . $mail->ErrorInfo);
+        }
+        return $ok;
     } catch (Throwable $e) {
         error_log('[Evee CRM] Mail to ' . $to . ' failed: ' . $e->getMessage());
         return false;

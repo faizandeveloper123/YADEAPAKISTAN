@@ -1427,12 +1427,13 @@ function send_dealer_registration_mail(string $email, string $name, ?string $pla
                 ? '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is already <strong style="color:#059669;">active</strong> and the submitter was emailed their login credentials.</p>'
                 : '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is <strong style="color:#B45309;">awaiting approval</strong>. Approve it under Settings -&gt; My Staff so the submitter can log in.</p>');
         foreach (mail_notify_recipients() as $notifyTo) {
-            send_app_mail(
+            $regOk = send_app_mail(
                 $notifyTo,
                 'Yadea Pakistan CRM',
                 'New dealership registration — ' . ($name !== '' ? $name : $email),
                 $teamHtml
             );
+            error_log('[Evee CRM] dealer-notify ' . ($email !== '' ? $email : 'no-email') . ' -> ' . $notifyTo . ' (ok=' . ($regOk ? '1' : '0') . ')');
         }
     }
 }
@@ -1468,12 +1469,13 @@ function notify_form_submission_mail(array $fields, string $label, string $ref, 
         . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Open the CRM to review, assign, and manage this submission.</p>';
 
     foreach (mail_notify_recipients() as $notifyTo) {
-        send_app_mail(
+        $okFormMail = send_app_mail(
             $notifyTo,
             'Yadea Pakistan CRM',
             $label . ($ref !== '' ? ' ' . $esc($ref) : '') . ' — ' . $who,
             $notifyHtml
         );
+        error_log('[Evee CRM] form-notify ' . ($ref !== '' ? $ref : $label) . ' -> ' . $notifyTo . ' (ok=' . ($okFormMail ? '1' : '0') . ')');
     }
 
     if ($skipAdmin) return;
