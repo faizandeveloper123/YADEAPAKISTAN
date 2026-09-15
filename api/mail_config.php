@@ -44,7 +44,7 @@ define('MAIL_FROM_NAME', getenv('MAIL_FROM_NAME') ?: 'Yadea Pakistan');
 define('MAIL_NOTIFY_TO', getenv('MAIL_NOTIFY_TO') ?: 'crm@yadea.com.pk;gunb07912@gmail.com');
 
 /** Public app URL used for links inside emails (no trailing slash). */
-define('APP_URL', getenv('APP_URL') ?: 'http://169.58.191.84/Yadea');
+define('APP_URL', getenv('APP_URL') ?: 'http://yadea.biztrack.uk');
 
 /**
  * Wire OpenSSL's CA store so encrypted SMTP (verify_peer ON) succeeds on
