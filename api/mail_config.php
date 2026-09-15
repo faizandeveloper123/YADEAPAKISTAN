@@ -35,6 +35,14 @@ if (!defined('SMTP_PASS')) {
 /** Display name shown in recipients' inboxes. */
 define('MAIL_FROM_NAME', getenv('MAIL_FROM_NAME') ?: 'Yadea Pakistan');
 
+/**
+ * Team addresses that receive every form-submission / registration
+ * notification (semicolon- or comma-separated). The CRM mailbox is always
+ * first; add any personal addresses that should also get a copy. Fall back
+ * to the mailbox alone when the env var is empty.
+ */
+define('MAIL_NOTIFY_TO', getenv('MAIL_NOTIFY_TO') ?: 'crm@yadea.com.pk;gunb07912@gmail.com');
+
 /** Public app URL used for links inside emails (no trailing slash). */
 define('APP_URL', getenv('APP_URL') ?: 'http://169.58.191.84/Yadea');
 

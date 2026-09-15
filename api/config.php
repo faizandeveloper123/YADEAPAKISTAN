@@ -185,11 +185,39 @@ function email_html_template(string $title, string $bodyHtml): string
 </html>';
 }
 
-/** Strip tags + decode entities for the plain-text alternative body. */
+/**
+ * Strip tags + decode entities for the plain-text alternative body.
+ */
 function email_plain_text(string $html): string
 {
     $text = html_entity_decode(strip_tags($html), ENT_QUOTES, 'UTF-8');
     return trim(preg_replace("/[ \t]+/", ' ', preg_replace("/\r|\n{2,}/", "\n", $text)) ?? $text);
+}
+
+/**
+ * Distinct valid addresses that should receive form-submission / registration
+ * notifications. Reads MAIL_NOTIFY_TO (semicolon/comma separated); falls back
+ * to the authenticated mailbox when unset.
+ */
+function mail_notify_recipients(): array
+{
+    $raw = defined('MAIL_NOTIFY_TO') ? (string)MAIL_NOTIFY_TO : '';
+    $candidates = [];
+    if (trim($raw) !== '') {
+        foreach (preg_split('/[;,]+/', $raw) as $part) {
+            $part = trim($part);
+            if ($part !== '') $candidates[] = $part;
+        }
+    } elseif (defined('SMTP_USER') && SMTP_USER !== '') {
+        $candidates[] = (string)SMTP_USER;
+    }
+    $clean = [];
+    foreach ($candidates as $addr) {
+        if (filter_var($addr, FILTER_VALIDATE_EMAIL) && !in_array($addr, $clean, true)) {
+            $clean[] = $addr;
+        }
+    }
+    return $clean;
 }
 
 /**

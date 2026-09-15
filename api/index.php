@@ -1417,20 +1417,23 @@ function send_dealer_registration_mail(string $email, string $name, ?string $pla
 
     send_app_mail($email, $name, 'We received your dealership registration', $html);
 
-    // Team-facing copy: the CRM mailbox always learns about a new dealer
-    // registration (Admins are already notified separately in register_dealer).
-    if (defined('SMTP_USER') && SMTP_USER !== '') {
+    // Team-facing copy: the CRM mailbox (and any configured notify addresses)
+    // always learn about a new dealer registration (Admins are already
+    // notified separately in register_dealer).
+    if (mail_notify_recipients() !== []) {
         $teamHtml = '<p style="margin:0 0 12px 0;font-size:14px;line-height:22px;color:#334155;">A new dealership registration was received from <strong>'
             . $esc($name !== '' ? $name : 'a visitor') . '</strong> (' . $esc($email) . ').</p>'
             . ($approved
                 ? '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is already <strong style="color:#059669;">active</strong> and the submitter was emailed their login credentials.</p>'
                 : '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is <strong style="color:#B45309;">awaiting approval</strong>. Approve it under Settings -&gt; My Staff so the submitter can log in.</p>');
-        send_app_mail(
-            (string)SMTP_USER,
-            'Yadea Pakistan CRM',
-            'New dealership registration — ' . ($name !== '' ? $name : $email),
-            $teamHtml
-        );
+        foreach (mail_notify_recipients() as $notifyTo) {
+            send_app_mail(
+                $notifyTo,
+                'Yadea Pakistan CRM',
+                'New dealership registration — ' . ($name !== '' ? $name : $email),
+                $teamHtml
+            );
+        }
     }
 }
 
@@ -1464,9 +1467,9 @@ function notify_form_submission_mail(array $fields, string $label, string $ref, 
         . $rows . '</table>'
         . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Open the CRM to review, assign, and manage this submission.</p>';
 
-    if (defined('SMTP_USER') && SMTP_USER !== '') {
+    foreach (mail_notify_recipients() as $notifyTo) {
         send_app_mail(
-            (string)SMTP_USER,
+            $notifyTo,
             'Yadea Pakistan CRM',
             $label . ($ref !== '' ? ' ' . $esc($ref) : '') . ' — ' . $who,
             $notifyHtml
