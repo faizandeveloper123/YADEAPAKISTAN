@@ -1391,7 +1391,10 @@ function ensure_soft_delete_support(): void
  */
 function send_dealer_registration_mail(string $email, string $name, ?string $plain, bool $approved): void
 {
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) return;
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        mail_debug_log('dealer-credentials SKIPPED invalid email ' . $email);
+        return;
+    }
     $esc = static fn ($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
 
     $p = 'style="margin:0 0 12px 0;font-size:14px;line-height:22px;color:#334155;"';
@@ -1415,7 +1418,8 @@ function send_dealer_registration_mail(string $email, string $name, ?string $pla
             . 'with a login button as soon as that happens.</p>';
     }
 
-    send_app_mail($email, $name, 'We received your dealership registration', $html);
+    $credsOk = send_app_mail($email, $name, 'We received your dealership registration', $html);
+    mail_debug_log('dealer-credentials mail to ' . $email . ' -> ' . ($credsOk ? 'SENT' : 'FAILED'));
 
     // Team-facing copy: the CRM mailbox (and any configured notify addresses)
     // always learn about a new dealer registration (Admins are already
@@ -1433,7 +1437,7 @@ function send_dealer_registration_mail(string $email, string $name, ?string $pla
                 'New dealership registration — ' . ($name !== '' ? $name : $email),
                 $teamHtml
             );
-            error_log('[Evee CRM] dealer-notify ' . ($email !== '' ? $email : 'no-email') . ' -> ' . $notifyTo . ' (ok=' . ($regOk ? '1' : '0') . ')');
+            mail_debug_log('dealer-notify ' . ($email !== '' ? $email : 'no-email') . ' -> ' . $notifyTo . ' (ok=' . ($regOk ? '1' : '0') . ')');
         }
     }
 }
@@ -1475,7 +1479,7 @@ function notify_form_submission_mail(array $fields, string $label, string $ref, 
             $label . ($ref !== '' ? ' ' . $esc($ref) : '') . ' — ' . $who,
             $notifyHtml
         );
-        error_log('[Evee CRM] form-notify ' . ($ref !== '' ? $ref : $label) . ' -> ' . $notifyTo . ' (ok=' . ($okFormMail ? '1' : '0') . ')');
+        mail_debug_log('form-notify ' . ($ref !== '' ? $ref : $label) . ' -> ' . $notifyTo . ' (ok=' . ($okFormMail ? '1' : '0') . ')');
     }
 
     if ($skipAdmin) return;

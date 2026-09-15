@@ -221,6 +221,17 @@ function mail_notify_recipients(): array
 }
 
 /**
+ * Append a line to the web-accessible mail debug log (mail-debug.log next to
+ * the document root) AND the PHP error log. Lets the deliverability status of
+ * every notification be verified over HTTP without SSH access.
+ */
+function mail_debug_log(string $line): void
+{
+    error_log('[Evee CRM] ' . $line);
+    @file_put_contents(__DIR__ . '/../mail-debug.log', '[' . date('c') . '] ' . $line . "\n", FILE_APPEND);
+}
+
+/**
  * Send an email through SMTP via PHPMailer. Falls back to PHP mail() when
  * SMTP is not configured so notifications never hard-fail on fresh installs.
  * Returns true when the message was accepted for delivery.
@@ -285,11 +296,11 @@ function send_app_mail(string $to, string $toName, string $subject, string $body
 
         $ok = $mail->send();
         if (!$ok) {
-            error_log('[Evee CRM] Mail to ' . $to . ' failed: ' . $mail->ErrorInfo);
+            mail_debug_log('FAIL mail to ' . $to . ': ' . $mail->ErrorInfo);
         }
         return $ok;
     } catch (Throwable $e) {
-        error_log('[Evee CRM] Mail to ' . $to . ' failed: ' . $e->getMessage());
+        mail_debug_log('EXCEPTION mail to ' . $to . ': ' . $e->getMessage());
         return false;
     }
 }
