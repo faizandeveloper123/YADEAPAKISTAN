@@ -31,9 +31,14 @@ jobs:
         env:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
-          if [ -n "$SMTP_PASS" ]; then
-            printf "<?php\ndefine('SMTP_PASS', '%s');\n" "$SMTP_PASS" > api/mail_secrets.php
+          # SMTP_PASS drives every transactional email (form acknowledgements,
+          # dealership registrations, CRM notifications). Refuse to deploy
+          # without it so the mail path can never silently break.
+          if [ -z "$SMTP_PASS" ]; then
+            echo "::error::SMTP_PASS secret is empty — refusing to deploy without a mail password."
+            exit 1
           fi
+          printf "<?php\ndefine('SMTP_PASS', '%s');\n" "$SMTP_PASS" > api/mail_secrets.php
 
       - name: Deploy to 81.17.101.93 (yadea.biztrack.uk)
         env:
@@ -72,15 +77,12 @@ jobs:
           cp -r api /tmp/site/api
           tar -czf /tmp/site.tar.gz -C /tmp/site .
 
-          # Step 3: Backup mail config on server
-          ssh -i ~/.ssh/deploy_key root@81.17.101.93 '
-            cp /var/www/yadea-pakistan/api/mail_config.php /tmp/mail_backup.php 2>/dev/null || true
-          '
-
-          # Step 4: Upload
+          # Step 3: Upload (mail config ships fresh from the repo so the
+          # current SMTP credentials are always deployed — nothing stale
+          # is preserved from previous builds)
           scp -i ~/.ssh/deploy_key /tmp/site.tar.gz root@81.17.101.93:/tmp/site.tar.gz
 
-          # Step 5: Extract, fix DB creds in config.php, restore mail, restart PHP-FPM
+          # Step 4: Extract, fix DB creds in config.php, restart PHP-FPM
           ssh -i ~/.ssh/deploy_key root@81.17.101.93 bash << 'SERVERDEPLOY'
           set -e
           rm -rf /var/www/yadea-pakistan/dist
@@ -88,14 +90,13 @@ jobs:
           tar -xzf /tmp/site.tar.gz -C /var/www/yadea-pakistan/dist/
           rm -rf /var/www/yadea-pakistan/api
           mv /var/www/yadea-pakistan/dist/api /var/www/yadea-pakistan/api
-          cp /tmp/mail_backup.php /var/www/yadea-pakistan/api/mail_config.php 2>/dev/null || true
 
           # Fix DB credentials in config.php (replace XAMPP defaults with production values)
           sed -i "s/define('DB_USER',.*$/define('DB_USER', getenv('DB_USER') ?: 'evee');/" /var/www/yadea-pakistan/api/config.php
           sed -i "s/define('DB_PASS',.*$/define('DB_PASS', getenv('DB_PASS') ?: 'EveeCrm2026!');/" /var/www/yadea-pakistan/api/config.php
 
           chown -R www-data:www-data /var/www/yadea-pakistan
-          rm -f /tmp/site.tar.gz /tmp/mail_backup.php
+          rm -f /tmp/site.tar.gz
           systemctl reload php8.3-fpm
           echo DEPLOY_OK
           SERVERDEPLOY

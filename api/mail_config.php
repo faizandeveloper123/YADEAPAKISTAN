@@ -1,60 +1,56 @@
 <?php
 /**
- * EVEE CRM - SMTP / mail configuration
+ * EVEE CRM — SMTP mail configuration
  *
- * Fill in the values below (or set the matching environment variables).
- * When SMTP_HOST is empty the API falls back to PHP's mail() so nothing
- * breaks before credentials are added.
+ * Outbound mail is sent through the website's own mailbox so SPF/DKIM stay
+ * aligned and messages land in the inbox instead of spam:
  *
- * Credentials you need from your email provider:
- *   1. SMTP HOST      e.g. smtp.gmail.com, smtp.hostinger.com, mail.yourdomain.com
- *   2. SMTP PORT      465 (SSL) or 587 (TLS/STARTTLS)
- *   3. ENCRYPTION     'ssl' for port 465, 'tls' for port 587
- *   4. USERNAME       the full email address used to send (e.g. no-reply@yourdomain.com)
- *   5. PASSWORD       the mailbox password (for Gmail: an App Password,
- *                     generated at https://myaccount.google.com/apppasswords)
- *   6. FROM NAME      display name shown in the inbox (e.g. "Yadea Pakistan")
+ *   HOST     mail.yadea.com.pk     (cPanel / Exim)
+ *   PORT     465                   (SSL / SMTPS)
+ *   USER     crm@yadea.com.pk
  *
- * Anti-spam notes:
- *   - Always use a real mailbox on YOUR domain as the sender.
- *   - Make sure your domain's DNS has an SPF record that includes your SMTP
- *     provider, and enable DKIM in the provider panel when available.
+ * The mailbox PASSWORD is NEVER stored in this file. It is resolved from:
+ *   1. api/mail_secrets.php  — gitignored, used on local/dev machines, or
+ *   2. the SMTP_PASS environment variable — used by the deploy workflow on
+ *      the production server (injected from the GitHub SMTP_PASS secret).
  *
- * APP_URL is used for login links inside emails (no trailing slash).
+ * Every value may be overridden with the matching environment variable.
+ * When SMTP_HOST is empty the app falls back to PHP mail(), so nothing
+ * breaks before credentials are configured.
  */
 
-define('SMTP_HOST', getenv('SMTP_HOST') ?: 'mail.yadea.com.pk'); // cPanel mailbox host
-define('SMTP_PORT', (int)(getenv('SMTP_PORT') ?: 465));    // 465 SSL (cPanel) or 587 TLS
-define('SMTP_SECURE', getenv('SMTP_SECURE') ?: 'ssl');     // 'ssl' | 'tls' | ''
-define('SMTP_USER', getenv('SMTP_USER') ?: 'crm@yadea.com.pk'); // sender mailbox
+define('SMTP_HOST', getenv('SMTP_HOST') ?: 'mail.yadea.com.pk');
+define('SMTP_PORT', (int)(getenv('SMTP_PORT') ?: 465));
+define('SMTP_SECURE', getenv('SMTP_SECURE') ?: 'ssl'); // 'ssl' | 'tls' | ''
+define('SMTP_USER', getenv('SMTP_USER') ?: 'crm@yadea.com.pk');
 
-// The mailbox password is NEVER committed. It lives in api/mail_secrets.php
-// (gitignored, local + server only) or the SMTP_PASS environment variable.
+// Local/dev password (gitignored). Falls through to SMTP_PASS for production.
 if (is_file(__DIR__ . '/mail_secrets.php')) {
     require_once __DIR__ . '/mail_secrets.php';
 }
 if (!defined('SMTP_PASS')) {
-    define('SMTP_PASS', (string)getenv('SMTP_PASS')); // empty until secrets are provided
+    define('SMTP_PASS', (string)getenv('SMTP_PASS'));
 }
+
+/** Display name shown in recipients' inboxes. */
+define('MAIL_FROM_NAME', getenv('MAIL_FROM_NAME') ?: 'Yadea Pakistan');
+
+/** Public app URL used for links inside emails (no trailing slash). */
+define('APP_URL', getenv('APP_URL') ?: 'http://169.58.191.84/Yadea');
 
 /**
  * Wire OpenSSL's CA store so encrypted SMTP (verify_peer ON) succeeds on
  * stock XAMPP, whose php.ini leaves openssl.cafile empty and curl.cainfo
- * pointed at a bundle Apache does not actually expose to PHP. Without this
- * PHPMailer aborts the TLS handshake with "Could not connect to SMTP host",
- * so no message ever leaves the box.
+ * pointing at a bundle Apache does not expose to PHP. Without this PHPMailer
+ * aborts the TLS handshake with "Could not connect to SMTP host", so no
+ * message ever leaves the box.
  */
 $ca_bundle = __DIR__ . '/lib/cacert.pem';
 if (is_file($ca_bundle)) {
     if (ini_set('openssl.cafile', $ca_bundle) === false) {
-        // ini_set banned (hardened host): fall back to env vars that the
-        // openssl stream wrapper honours on most builds.
+        // ini_set banned (hardened host): fall back to env vars honouring
+        // the openssl stream wrapper on most builds.
         putenv('SSL_CERT_FILE=' . $ca_bundle);
         putenv('CURL_CA_BUNDLE=' . $ca_bundle);
     }
 }
-
-define('MAIL_FROM_NAME', getenv('MAIL_FROM_NAME') ?: 'Yadea Pakistan');
-
-/** Public site URL used in email links (no trailing slash). */
-define('APP_URL', getenv('APP_URL') ?: 'http://169.58.191.84/Yadea');
