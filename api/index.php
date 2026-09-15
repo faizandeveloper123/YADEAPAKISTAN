@@ -271,6 +271,23 @@ function create_contact(array $body): void
     $avatarData = normalize_optional($body['avatar_data'] ?? null);
     $customFields = normalize_custom_fields($body['custom_fields'] ?? null);
 
+    // PUBLIC FORM DETECTION: public custom forms submit
+    // { custom_fields: { form_submissions: [{ formName, submittedOn, values }] } }.
+    // Any such row is a real website submission -> the CRM team gets notified
+    // (mailbox copy + Admins). Manual adds / imports carry no form_submissions
+    // and are left untouched (no spam).
+    $formSubmission = null;
+    $formName = '';
+    if (is_array($customFields) && is_array($customFields['form_submissions'] ?? null)) {
+        foreach ($customFields['form_submissions'] as $sub) {
+            if (is_array($sub) && isset($sub['formName'])) {
+                $formSubmission = $sub;
+                $formName = (string)$sub['formName'];
+                break;
+            }
+        }
+    }
+
     $tagInput = array_values(array_filter(
         array_map(fn($t) => trim((string)$t), (array)($body['tags'] ?? [])),
         fn($t) => $t !== ''
@@ -365,6 +382,11 @@ function create_contact(array $body): void
             }
 
             $pdo->commit();
+
+            if ($formSubmission !== null) {
+                notify_form_submission_from_contact($formName, $formSubmission, $firstName, $lastName, $email, $phone, $business);
+            }
+
             respond(['data' => ['id' => $existingId], 'message' => 'Contact already exists; updated'], 200);
         }
 
@@ -400,6 +422,10 @@ function create_contact(array $body): void
     } catch (PDOException $e) {
         $pdo->rollBack();
         fail('Database error: ' . $e->getMessage(), 500);
+    }
+
+    if ($formSubmission !== null) {
+        notify_form_submission_from_contact($formName, $formSubmission, $firstName, $lastName, $email, $phone, $business);
     }
 
     respond(['data' => ['id' => $contactId], 'message' => 'Contact created'], 201);
@@ -1390,6 +1416,111 @@ function send_dealer_registration_mail(string $email, string $name, ?string $pla
     }
 
     send_app_mail($email, $name, 'We received your dealership registration', $html);
+
+    // Team-facing copy: the CRM mailbox always learns about a new dealer
+    // registration (Admins are already notified separately in register_dealer).
+    if (defined('SMTP_USER') && SMTP_USER !== '') {
+        $teamHtml = '<p style="margin:0 0 12px 0;font-size:14px;line-height:22px;color:#334155;">A new dealership registration was received from <strong>'
+            . $esc($name !== '' ? $name : 'a visitor') . '</strong> (' . $esc($email) . ').</p>'
+            . ($approved
+                ? '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is already <strong style="color:#059669;">active</strong> and the submitter was emailed their login credentials.</p>'
+                : '<p style="margin:0;font-size:14px;line-height:22px;color:#334155;">The account is <strong style="color:#B45309;">awaiting approval</strong>. Approve it under Settings -&gt; My Staff so the submitter can log in.</p>');
+        send_app_mail(
+            (string)SMTP_USER,
+            'Yadea Pakistan CRM',
+            'New dealership registration — ' . ($name !== '' ? $name : $email),
+            $teamHtml
+        );
+    }
+}
+
+/**
+ * Team-facing email for ANY website/submission form. Sends a detail copy to
+ * the CRM mailbox (SMTP_USER) and notifies every Admin (portal bell + email).
+ * $fields is a flat ['label' => value] map (empty values skipped).
+ * $skipAdmin suppresses the Admin notifications for callers that already
+ * notify admins themselves (e.g. dealer registration).
+ */
+function notify_form_submission_mail(array $fields, string $label, string $ref, string $type, bool $skipAdmin = false): void
+{
+    $esc = static fn ($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+
+    $rows = '';
+    foreach ($fields as $field => $value) {
+        if ($value === null || trim((string)$value) === '') continue;
+        $rows .= '<tr>'
+            . '<td style="padding:8px 12px;font-size:13px;color:#475569;white-space:nowrap;vertical-align:top;">' . $esc($field) . '</td>'
+            . '<td style="padding:8px 12px;font-size:13px;color:#1e293b;word-break:break-word;">' . $esc($value) . '</td>'
+            . '</tr>';
+    }
+
+    $who = trim((string)($fields['Name'] ?? ''));
+    if ($who === '') $who = trim((string)($fields['Business'] ?? ''));
+    if ($who === '') $who = 'Unnamed submitter';
+
+    $notifyHtml = '<p style="margin:0 0 14px 0;font-size:14px;line-height:22px;color:#334155;">A new '
+        . $label . ' was just submitted' . ($ref !== '' ? ' (' . $esc($ref) . ')' : '') . ':</p>'
+        . '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin:0 0 16px 0;">'
+        . $rows . '</table>'
+        . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Open the CRM to review, assign, and manage this submission.</p>';
+
+    if (defined('SMTP_USER') && SMTP_USER !== '') {
+        send_app_mail(
+            (string)SMTP_USER,
+            'Yadea Pakistan CRM',
+            $label . ($ref !== '' ? ' ' . $esc($ref) : '') . ' — ' . $who,
+            $notifyHtml
+        );
+    }
+
+    if ($skipAdmin) return;
+
+    $loc = trim((string)($fields['City'] ?? ''));
+    $detail = $who . ($loc !== '' ? ', ' . $loc : '')
+        . ' — ' . $label . ' submitted. Open the CRM to review.';
+    $adminIds = db()->query("SELECT id FROM staff_users WHERE user_type = 'Admin'")->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($adminIds as $adminId) {
+        notify_staff((int)$adminId, null, $type, $label, $detail);
+    }
+}
+
+/**
+ * Bridge between a public custom form (create_contact with a form_submissions
+ * custom field) and notify_form_submission_mail. Builds the field map from
+ * the submitted values plus the contact-level name/email/phone/business.
+ */
+function notify_form_submission_from_contact(
+    string $formName,
+    array $submission,
+    ?string $firstName,
+    ?string $lastName,
+    ?string $email,
+    ?string $phone,
+    ?string $business
+): void {
+    $fields = ['Form' => $formName];
+    if (is_array($submission['values'] ?? null)) {
+        foreach ($submission['values'] as $k => $v) {
+            $fields[(string)$k] = $v;
+        }
+    }
+    if (trim((string)($fields['Name'] ?? '')) === '') {
+        $full = trim(($firstName ?? '') . ' ' . ($lastName ?? ''));
+        if ($full !== '') $fields['Name'] = $full;
+    }
+    if (!isset($fields['Email'])) $fields['Email'] = $email ?? '';
+    if (!isset($fields['Phone'])) $fields['Phone'] = $phone ?? '';
+    if (!isset($fields['Business'])) $fields['Business'] = $business ?? '';
+
+    // Dealer-named forms already notify Admins themselves (register_dealer),
+    // so skip the duplicate Admin notification there; mailbox copy still goes.
+    notify_form_submission_mail(
+        $fields,
+        'Form submission — ' . $formName,
+        '',
+        'form_submitted',
+        (bool)preg_match('/dealer/i', $formName)
+    );
 }
 
 /**
@@ -3097,16 +3228,10 @@ function create_submission(array $body): void
         $subHtml
     );
 
-    // Notify the CRM team: always drop a copy in the CRM mailbox and notify
-    // every Admin (portal bell + email), so a form submission never lands
-    // silently. The submitter's ack above is separate — this is the
-    // team-facing notification.
-    $esc = static fn ($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    // Notify the CRM team with the full submission details (CRM mailbox copy
+    // + Admin portal/email notification), so a form never lands silently.
     $label = $type === 'inquiry' ? 'Support inquiry' : 'Dealership application';
-    $who = $f['name'] !== '' ? $f['name'] : ($f['business_name'] !== '' ? $f['business_name'] : 'Unnamed submitter');
-
-    $rows = '';
-    $fieldRows = [
+    $notifyFields = [
         'Reference' => $code,
         'Type' => $label,
         'Name' => $f['name'],
@@ -3125,35 +3250,12 @@ function create_submission(array $body): void
         'Problem category' => $f['problem_category'],
         'Reason / details' => $f['reason'],
     ];
-    foreach ($fieldRows as $field => $value) {
-        if ($value === null || $value === '') continue;
-        $rows .= '<tr>'
-            . '<td style="padding:8px 12px;font-size:13px;color:#475569;white-space:nowrap;vertical-align:top;">' . $esc($field) . '</td>'
-            . '<td style="padding:8px 12px;font-size:13px;color:#1e293b;word-break:break-word;">' . $esc($value) . '</td>'
-            . '</tr>';
-    }
-
-    $notifyHtml = '<p style="margin:0 0 14px 0;font-size:14px;line-height:22px;color:#334155;">A new '
-        . $label . ' was just submitted from the website:</p>'
-        . '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin:0 0 16px 0;">'
-        . $rows . '</table>'
-        . '<p style="margin:0;font-size:13px;line-height:20px;color:#64748b;">Open Customer Inquiries in the CRM to review, assign, and manage this submission.</p>';
-
-    if (defined('SMTP_USER') && SMTP_USER !== '') {
-        send_app_mail(
-            (string)SMTP_USER,
-            'Yadea Pakistan CRM',
-            ($type === 'inquiry' ? 'New inquiry ' : 'New dealership application ') . $code . ' — ' . $who,
-            $notifyHtml
-        );
-    }
-
-    $title = ($type === 'inquiry' ? 'New support inquiry ' : 'New dealership application ') . $code;
-    $detail = $who . ($f['city'] !== '' ? ', ' . $f['city'] : '') . ' (' . ($f['email'] !== '' ? $f['email'] : ($f['phone'] !== '' ? $f['phone'] : 'no contact info')) . ') — ' . $label . ' submitted. Open Customer Inquiries to review.';
-    $adminIds = db()->query("SELECT id FROM staff_users WHERE user_type = 'Admin'")->fetchAll(PDO::FETCH_COLUMN);
-    foreach ($adminIds as $adminId) {
-        notify_staff((int)$adminId, null, $type === 'inquiry' ? 'inquiry_received' : 'application_received', $title, $detail);
-    }
+    notify_form_submission_mail(
+        $notifyFields,
+        $label,
+        $code,
+        $type === 'inquiry' ? 'inquiry_received' : 'application_received'
+    );
 
     $get = db()->prepare(
         'SELECT s.*, u.full_name AS assigned_to_name FROM portal_submissions s
