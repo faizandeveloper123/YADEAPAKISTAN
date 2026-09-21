@@ -7,7 +7,6 @@ import { useForms, type StoredForm } from '../data/formsStore';
 import {
   fileToDataUrl,
   serializeFormForUrl,
-  formSubmissionsOf,
   formatDbDate,
   initialsFromName,
   publicPayloadWithHostedImage,
@@ -175,6 +174,8 @@ interface SubmissionRow {
   formName: string;
   submittedOn: string;
   contactId: number;
+  /** Index of this entry inside the contact's custom_fields.form_submissions array. */
+  subIndex: number;
   contactInitials: string;
   contactBg: string;
   fullName: string;
@@ -1441,19 +1442,28 @@ function FormsDashboard() {
       const res = await api.listContacts({});
       const rows: SubmissionRow[] = [];
       for (const c of res.data) {
-        const subs = formSubmissionsOf(c.custom_fields);
-        subs.forEach((s, i) => {
+        // Read the raw stored array so subIndex always points at the real slot
+        // inside custom_fields.form_submissions (used later to delete a row).
+        const rawSubs = Array.isArray(c.custom_fields?.['form_submissions'])
+          ? (c.custom_fields?.['form_submissions'] as unknown[])
+          : [];
+        rawSubs.forEach((entry, i) => {
+          if (!entry || typeof entry !== 'object') return;
+          const s = entry as { formName?: unknown; submittedOn?: unknown; values?: unknown };
+          if (typeof s.formName !== 'string') return;
           rows.push({
             id: c.id * 1000 + i,
             formName: s.formName,
-            submittedOn: s.submittedOn ?? c.created_at ?? '',
+            submittedOn:
+              typeof s.submittedOn === 'string' ? s.submittedOn : c.created_at ?? '',
             contactId: c.id,
+            subIndex: i,
             contactInitials: initialsFromName(c.name),
             contactBg: 'bg-slate-200 text-slate-700',
             fullName: c.name,
             email: c.email ?? '',
             phone: c.phone ?? '',
-            values: s.values ?? {},
+            values: (s.values as Record<string, string>) ?? {},
           });
         });
       }
@@ -2086,6 +2096,65 @@ function FormsDashboard() {
     });
   };
 
+  /** Remove the given entries from their contacts' form_submissions array. */
+  const deleteSubmissionEntries = async (
+    entries: { contactId: number; subIndex: number }[]
+  ) => {
+    const byContact = new Map<number, number[]>();
+    for (const e of entries) {
+      const list = byContact.get(e.contactId) ?? [];
+      list.push(e.subIndex);
+      byContact.set(e.contactId, list);
+    }
+    for (const [contactId, indices] of byContact) {
+      const res = await api.getContact(contactId);
+      const cf: Record<string, unknown> = { ...(res.data.custom_fields ?? {}) };
+      const raw = Array.isArray(cf['form_submissions'])
+        ? [...(cf['form_submissions'] as unknown[])]
+        : [];
+      // Remove from the back so earlier indices stay valid.
+      [...indices].sort((a, b) => b - a).forEach((i) => {
+        if (i >= 0 && i < raw.length) raw.splice(i, 1);
+      });
+      cf['form_submissions'] = raw;
+      await api.updateContact(contactId, { custom_fields: cf });
+    }
+  };
+
+  const deleteOneSubmission = async (sub: SubmissionRow) => {
+    const who = sub.fullName || sub.email || 'this contact';
+    if (!window.confirm(`Delete this submission from ${who}?`)) return;
+    try {
+      await deleteSubmissionEntries([{ contactId: sub.contactId, subIndex: sub.subIndex }]);
+      triggerToast('Submission deleted');
+      await loadSubmissions();
+    } catch (err) {
+      triggerToast(`Delete failed: ${(err as Error).message}`);
+    }
+  };
+
+  const deleteAllSubmissions = async () => {
+    if (filteredSubmissions.length === 0) {
+      triggerToast('No submissions to delete');
+      return;
+    }
+    if (
+      !window.confirm(
+        `Delete all ${filteredSubmissions.length} submission(s) currently shown? This cannot be undone.`
+      )
+    )
+      return;
+    try {
+      await deleteSubmissionEntries(
+        filteredSubmissions.map((s) => ({ contactId: s.contactId, subIndex: s.subIndex }))
+      );
+      triggerToast('Submissions deleted');
+      await loadSubmissions();
+    } catch (err) {
+      triggerToast(`Delete failed: ${(err as Error).message}`);
+    }
+  };
+
   const openManageColumnsModal = () => {
     setTempCols(JSON.parse(JSON.stringify(submissionCols)));
     setManageColsOpen(true);
@@ -2560,6 +2629,14 @@ function FormsDashboard() {
                         <span>Export</span>
                       </button>
                       <button
+                        onClick={() => void deleteAllSubmissions()}
+                        disabled={filteredSubmissions.length === 0}
+                        className="px-3 py-1.5 border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-md text-xs font-medium flex items-center gap-1.5 shadow-xs transition"
+                      >
+                        <FaRegTrashCan className="text-xs" />
+                        <span>Delete all</span>
+                      </button>
+                      <button
                         onClick={refreshSubmissions}
                         className="p-1.5 border border-slate-300 text-slate-600 hover:bg-slate-50 rounded-md text-xs shadow-xs transition"
                         title="Refresh data"
@@ -2614,13 +2691,14 @@ function FormsDashboard() {
                                 {col.label}
                               </th>
                             ))}
+                          <th className="py-3 px-3 w-12 text-center font-semibold">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
                         {filteredSubmissions.length === 0 && (
                           <tr>
                             <td
-                              colSpan={submissionCols.filter((c) => c.visible).length + 1}
+                              colSpan={submissionCols.filter((c) => c.visible).length + 2}
                               className="py-8 text-center text-slate-400"
                             >
                               <FaRegFolderOpen className="text-2xl mb-2 block mx-auto" />
@@ -2645,6 +2723,15 @@ function FormsDashboard() {
                                   {renderSubmissionCell(col.key, sub)}
                                 </td>
                               ))}
+                            <td className="py-3.5 px-3 text-center">
+                              <button
+                                onClick={() => void deleteOneSubmission(sub)}
+                                className="text-red-500 hover:text-red-700 p-1.5 bg-red-50 rounded hover:bg-red-100 transition"
+                                title="Delete submission"
+                              >
+                                <FaRegTrashCan className="text-xs" />
+                              </button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>

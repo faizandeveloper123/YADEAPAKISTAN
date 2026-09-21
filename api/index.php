@@ -383,6 +383,9 @@ function create_contact(array $body): void
 
             $pdo->commit();
 
+            // Link the (re-)submitted contact to its outlet smart list.
+            sync_contact_outlet_smart_lists($existingId);
+
             if ($formSubmission !== null) {
                 notify_form_submission_from_contact($formName, $formSubmission, $firstName, $lastName, $email, $phone, $business);
             }
@@ -423,6 +426,9 @@ function create_contact(array $body): void
         $pdo->rollBack();
         fail('Database error: ' . $e->getMessage(), 500);
     }
+
+    // Link the new contact to its outlet smart list.
+    sync_contact_outlet_smart_lists($contactId);
 
     if ($formSubmission !== null) {
         notify_form_submission_from_contact($formName, $formSubmission, $firstName, $lastName, $email, $phone, $business);
@@ -2622,6 +2628,132 @@ function duplicate_smart_list(int $id, array $body): void
     respond(['data' => smart_list_payload(smart_list_fetch($newId)), 'message' => 'Smart list duplicated']);
 }
 
+/* ------------- OUTLET -> SMART LIST AUTO-LINKING ------------- */
+
+/**
+ * Owner of the auto-created outlet smart lists: the first Admin account.
+ * Returns 0 when no admin exists (linking is then skipped).
+ */
+function outlet_smart_list_owner(): int
+{
+    try {
+        $id = db()->query("SELECT id FROM staff_users WHERE user_type = 'Admin' ORDER BY id ASC LIMIT 1")
+            ->fetchColumn();
+        return $id !== false ? (int)$id : 0;
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+/** Collect every outlet (child option) configured on a form's local dropdown fields. */
+function extract_form_outlets($elements): array
+{
+    if (!is_array($elements)) return [];
+    $outlets = [];
+    foreach ($elements as $el) {
+        if (!is_array($el) || ($el['type'] ?? '') !== 'local_dropdown') continue;
+        foreach (($el['rows'] ?? []) as $row) {
+            if (!is_array($row)) continue;
+            foreach (($row['rules'] ?? []) as $rule) {
+                if (!is_array($rule)) continue;
+                foreach (($rule['options'] ?? []) as $opt) {
+                    $name = trim((string)$opt);
+                    if ($name !== '') $outlets[$name] = true;
+                }
+            }
+        }
+    }
+    return array_keys($outlets);
+}
+
+/**
+ * Make sure one global smart list exists for every outlet configured on a form.
+ * Called whenever a form is created/updated, so a newly added outlet instantly
+ * gets its own smart list (outlet <-> smart list stay connected).
+ */
+function ensure_outlet_smart_lists(array $outlets): void
+{
+    $outlets = array_values(array_unique(array_filter(
+        array_map(fn($o) => trim((string)$o), $outlets),
+        fn($o) => $o !== ''
+    )));
+    if (!$outlets) return;
+    $owner = outlet_smart_list_owner();
+    if ($owner <= 0) return;
+    try {
+        $ins = db()->prepare(
+            'INSERT IGNORE INTO smart_lists
+                (name, filters, sort_by, fields, members, dealer_id, shared_all, created_by)
+             VALUES (:name, NULL, NULL, NULL, NULL, NULL, 1, :owner)'
+        );
+        foreach ($outlets as $name) {
+            $ins->execute([':name' => $name, ':owner' => $owner]);
+        }
+    } catch (Throwable $e) {
+        // Outlet smart lists are best-effort; never block a form save.
+    }
+}
+
+/**
+ * After a contact is created/updated from a form submission, add it to the
+ * smart list of the outlet it selected. The outlet value is matched against
+ * smart list names, preferring the child ("... Outlet") value of any
+ * local dropdown field. Safe to call repeatedly (idempotent).
+ */
+function sync_contact_outlet_smart_lists(int $contactId): void
+{
+    if ($contactId <= 0) return;
+    try {
+        $stmt = db()->prepare('SELECT custom_fields FROM contacts WHERE id = :id');
+        $stmt->execute([':id' => $contactId]);
+        $raw = $stmt->fetchColumn();
+        if ($raw === false || $raw === null || $raw === '') return;
+
+        $cf = decode_custom_fields((string)$raw);
+        $subs = $cf['form_submissions'] ?? null;
+        if (!is_array($subs)) return;
+
+        $preferred = [];
+        $fallback = [];
+        foreach ($subs as $sub) {
+            if (!is_array($sub) || !is_array($sub['values'] ?? null)) continue;
+            foreach ($sub['values'] as $key => $val) {
+                if (!is_string($val)) continue;
+                $val = trim($val);
+                if ($val === '') continue;
+                $fallback[$val] = true;
+                // The stored key is "<element label> · <child label>". Only the
+                // child label tells us this is the outlet dropdown (the element
+                // label itself may also say "Outlet", e.g. "Outlet · Select City").
+                $sep = strrpos((string)$key, '·');
+                $childLabel = $sep !== false ? substr((string)$key, $sep) : (string)$key;
+                if (stripos($childLabel, 'outlet') !== false) $preferred[$val] = true;
+            }
+        }
+        $names = array_keys($preferred ?: $fallback);
+        if (!$names) return;
+
+        $pdo = db();
+        $ph = implode(',', array_fill(0, count($names), '?'));
+        $q = $pdo->prepare("SELECT id, members FROM smart_lists WHERE name IN ($ph)");
+        $q->execute($names);
+        $upd = $pdo->prepare('UPDATE smart_lists SET members = :members WHERE id = :id');
+        foreach ($q->fetchAll() as $row) {
+            $members = decode_json_field($row['members'] ?? null);
+            $ids = [];
+            foreach ((array)$members as $m) {
+                if (is_numeric($m)) $ids[] = (int)$m;
+            }
+            if (in_array($contactId, $ids, true)) continue;
+            $ids[] = $contactId;
+            $ids = array_values(array_unique($ids));
+            $upd->execute([':members' => encode_json_field($ids), ':id' => (int)$row['id']]);
+        }
+    } catch (Throwable $e) {
+        // Never let smart-list syncing break a form submission.
+    }
+}
+
 /* ----------------------- FORM IMAGES (short form links) ----------------------- */
 
 /** Ensure the form_images table exists (created lazily so no manual SQL is needed). */
@@ -2761,6 +2893,8 @@ function create_form(array $body): void
     $id = (int)db()->lastInsertId();
     $stmt = db()->prepare('SELECT * FROM forms WHERE id = :id');
     $stmt->execute([':id' => $id]);
+    // Every outlet configured on the form gets its own smart list.
+    ensure_outlet_smart_lists(extract_form_outlets($body['elements'] ?? null));
     respond(['data' => form_payload($stmt->fetch() ?: ['id' => $id]), 'message' => 'Form saved'], 201);
 }
 
@@ -2805,6 +2939,10 @@ function update_form(int $id, array $body): void
     db()->prepare('UPDATE forms SET ' . implode(', ', $sets) . ' WHERE id = :id')->execute($params);
     $stmt = db()->prepare('SELECT * FROM forms WHERE id = :id');
     $stmt->execute([':id' => $id]);
+    // A newly added outlet on the form instantly gets its own smart list.
+    if (array_key_exists('elements', $body)) {
+        ensure_outlet_smart_lists(extract_form_outlets($body['elements']));
+    }
     respond(['data' => form_payload($stmt->fetch() ?: []), 'message' => 'Form updated']);
 }
 
