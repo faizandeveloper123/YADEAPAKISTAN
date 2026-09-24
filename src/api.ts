@@ -578,6 +578,9 @@ export const api = {
       body: JSON.stringify({ ids }),
     }),
 
+  restoreContact: (id: number) =>
+    request<{ message: string }>(`/maintenance/restore-contact/${id}`, { method: 'POST' }),
+
   listOpportunities: (contactId: number) =>
     request<{ data: Opportunity[]; count: number }>(`/contacts/${contactId}/opportunities`),
 
