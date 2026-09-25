@@ -752,6 +752,17 @@ function delete_appointment(int $id): void
     respond(['message' => 'Appointment deleted']);
 }
 
+/** List every appointment (used by the Sites analytics tab to count test-ride bookings). */
+function list_all_appointments(): void
+{
+    $rows = db()->query(
+        'SELECT id, contact_id, title, calendar, host, date, start_time, end_time,
+                location, status, notes, category, created_at
+           FROM appointments ORDER BY created_at DESC'
+    )->fetchAll();
+    respond(['data' => $rows, 'count' => count($rows)]);
+}
+
 /* ------------------- STAFF USERS (My Staff) ------------------- */
 
 /** Decode a stored JSON text column into a PHP array (or [] when empty). */
@@ -3778,6 +3789,9 @@ switch ($resource) {
         break;
 
     case 'appointments':
+        if ($method === 'GET') {
+            list_all_appointments();
+        }
         if ($method === 'DELETE') {
             $id = $parts[1] ?? null;
             if (!$id) fail('Appointment id required');

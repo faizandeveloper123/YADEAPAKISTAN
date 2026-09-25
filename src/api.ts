@@ -620,6 +620,9 @@ export const api = {
   listAppointments: (contactId: number) =>
     request<{ data: Appointment[]; count: number }>(`/contacts/${contactId}/appointments`),
 
+  listAllAppointments: () =>
+    request<{ data: Appointment[]; count: number }>('/appointments'),
+
   createAppointment: (contactId: number, input: Partial<Appointment>) =>
     request<{ data: { id: number }; message: string }>(`/contacts/${contactId}/appointments`, {
       method: 'POST',
